@@ -1,0 +1,9 @@
+{
+  "name": "PowerGrid Outage Tracker",
+  "short_name": "PowerGrid",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#05030b",
+  "theme_color": "#05030b",
+  "description": "Offline-capable power outage reporting for Batangas City"
+}

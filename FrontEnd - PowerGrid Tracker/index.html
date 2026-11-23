@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#05030b">
+    <link rel="manifest" href="manifest.json">
+    <!-- Must run first: sends visitors who are not logged in to login.html -->
+    <script src="Auth.js"></script> 
+    <script>Auth.guard();</script>
+    <title>PowerGrid Outage Tracker · Batangas City</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Fira+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="offline-banner" id="offline-banner" role="status" hidden>
+        <span>Offline mode</span>
+        <small>Saved reports stay on this device until a server is available.</small>
+    </div>
+    <!-- Blurred purple glow behind everything -->
+    <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+
+    <aside class="sidebar">
+        <div class="brand" aria-label="PowerGrid">⚡</div>
+
+        <nav class="nav">
+            <button class="nav-item active" type="button" data-page="map" aria-label="Live Map" title="Live Map (press 1)">
+                <span class="nav-icon">⌖</span>
+                <span>Live Map</span>
+            </button>
+            <button class="nav-item" type="button" data-page="report" aria-label="Report" title="Report (press 2)">
+                <span class="nav-icon">＋</span>
+                <span>Report</span>
+            </button>
+            <button class="nav-item" type="button" data-page="network" aria-label="Network" title="Network (press 3)">
+                <span class="nav-icon">⌂</span>
+                <span>Network</span>
+            </button>
+            <button class="nav-item" type="button" data-page="admin" aria-label="Admin" title="Admin (press 4)">
+                <span class="nav-icon">▦</span>
+                <span>Admin</span>
+            </button>
+        </nav>
+
+        <div class="user-box">
+            <div class="avatar" id="user-avatar" aria-hidden="true">?</div>
+            <p class="user-name" id="user-name">Guest</p>
+            <p class="user-role" id="user-role">Resident</p>
+            <button class="logout-button" id="logout-button" type="button">Log out</button>
+        </div>
+    </aside>
+
+    <main class="app">
+        <!-- ===================== LIVE MAP ===================== -->
+        <section class="page view-active" id="map-page">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · BATANGAS CITY</p>
+                    <h1>Live Outage Map</h1>
+                </div>
+                <div class="live-status"><span></span> LIVE</div>
+            </header>
+
+            <section class="announcement spot">
+                <span class="speaker">⌁</span>
+                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+            </section>
+
+            <section class="stats spot">
+                <article>
+                    <p>Active outages</p>
+                    <strong id="stat-active">0</strong>
+                </article>
+                <article>
+                    <p>Households without power</p>
+                    <strong id="stat-households">0</strong>
+                </article>
+                <article>
+                    <p>Restored</p>
+                    <strong id="stat-restored">0</strong>
+                </article>
+                <article>
+                    <p>Feeder nodes online</p>
+                    <strong id="stat-feeders">3 <small>of 3</small></strong>
+                </article>
+            </section>
+
+            <section class="map-panel">
+                <div class="filter-row">
+                    <div class="tabs" role="tablist">
+                        <button class="tab active" data-filter="all" type="button">All (5)</button>
+                        <button class="tab" data-filter="reported" type="button">Reported (2)</button>
+                        <button class="tab" data-filter="verified" type="button">Verified (1)</button>
+                        <button class="tab" data-filter="repair" type="button">Under Repair (1)</button>
+                        <button class="tab" data-filter="restored" type="button">Restored (1)</button>
+                    </div>
+                </div>
+                <div class="map-search-row">
+                    <input id="map-search" type="search" placeholder="Search reports or streets" aria-label="Search reports or streets">
+                    <select id="map-barangay-filter" aria-label="Filter by barangay">
+                        <option value="">All barangays</option>
+                    </select>
+                    <label>From <span class="calendar-field"><input id="map-date-from" type="text" placeholder="Choose date" readonly><button type="button" class="calendar-trigger" data-calendar-target="map-date-from" aria-label="Choose start date">▦</button></span></label>
+                    <label>To <span class="calendar-field"><input id="map-date-to" type="text" placeholder="Choose date" readonly><button type="button" class="calendar-trigger" data-calendar-target="map-date-to" aria-label="Choose end date">▦</button></span></label>
+                    <button class="ghost-button" id="clear-map-filters" type="button">Clear</button>
+                    <button class="ghost-button" id="pin-return-report" type="button" hidden>Return to report</button>
+                </div>
+
+                <div class="map-area" id="map-area">
+                    <div id="leaflet-map" aria-label="Leaflet map of Batangas City outages"></div>
+                    <span class="map-label">Batangas City · Live leaflet map</span>
+                    <span class="bay-label">BATANGAS BAY</span>
+                    <button class="map-fullscreen-toggle" id="map-fullscreen-toggle" type="button" aria-pressed="false">Full view</button>
+
+                    <div class="map-legend" aria-hidden="true">
+                        <span class="reported"><i></i>Reported</span>
+                        <span class="verified"><i></i>Verified</span>
+                        <span class="repair"><i></i>Repair</span>
+                        <span class="restored"><i></i>Restored</span>
+                    </div>
+
+                    <aside class="outage-card" id="outage-card">
+                        <p class="card-kicker">SELECTED OUTAGE #1</p>
+                        <h2 id="card-name">Poblacion</h2>
+                        <p id="card-address" class="card-address">P. Burgos Street</p>
+                        <span class="status-badge verified" id="card-status">Verified</span>
+                        <div class="card-details">
+                            <div>
+                                <span>Households</span>
+                                <strong id="card-households">48</strong>
+                            </div>
+                            <div>
+                                <span>Restoration ETA</span>
+                                <strong id="card-eta">1h 10m</strong>
+                            </div>
+                        </div>
+                        <p class="card-meta" id="card-meta"></p>
+                        <img id="card-photo" class="card-photo" alt="Photo attached to report" hidden>
+                        <button class="manage-button" id="manage-button" type="button">Manage in Admin Board</button>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="area-status spot">
+                <div class="area-status-heading">
+                    <div>
+                        <h3>Brownout areas</h3>
+                        <p>Choose an area to locate it on the map.</p>
+                    </div>
+                    <span class="area-status-summary" id="area-status-summary">Loading areas...</span>
+                </div>
+                <div class="area-status-grid" id="area-status-grid"></div>
+            </section>
+
+            <section class="forecast spot">
+                <h3>Outage risk forecast by barangay</h3>
+                <p>Demo estimate based on the outage reports saved in this browser—not an official prediction.</p>
+                <div class="forecast-grid" id="forecast-grid"></div>
+            </section>
+
+            <section class="history-panel spot">
+                <div class="history-heading">
+                    <div><h3>Outage history and monthly summary</h3><p>Summary uses reports stored in this browser.</p></div>
+                    <label>Month <input id="history-month" type="month"></label>
+                </div>
+                <div id="history-summary" class="history-summary"></div>
+                <div id="history-list" class="history-list"></div>
+            </section>
+        </section>
+
+        <!-- ===================== REPORT ===================== -->
+        <section class="page" id="report-page">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · BATANGAS CITY</p>
+                    <h1>Report a Power Outage</h1>
+                </div>
+                <div class="live-status"><span></span> LIVE</div>
+            </header>
+
+            <section class="announcement spot">
+                <span class="speaker">⌁</span>
+                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+            </section>
+
+            <section class="report-panel spot">
+                <div class="report-steps">
+                    <button class="step active" type="button" data-go="1">1. Where</button>
+                    <button class="step" type="button" data-go="2">2. When</button>
+                    <button class="step" type="button" data-go="3">3. Details</button>
+                </div>
+
+                <!-- Step 1 -->
+                <div class="step-panel active" data-step="1">
+                    <h2>Where is the outage?</h2>
+                    <div class="barangay-grid">
+                        <div id="report-barangay-options" class="barangay-options"></div>
+                    </div>
+                    <label for="landmark">Street or landmark</label>
+                    <input id="landmark" type="text" placeholder="Example: near the barangay hall" autocomplete="off">
+                    <button class="ghost-button pin-pick-button" id="pick-report-pin" type="button">Choose exact location on map</button>
+                    <p class="pin-status" id="report-pin-status">No exact pin selected; the area center will be used.</p>
+                    <label class="file-upload" for="report-photo">
+                        <span class="file-upload-action">Choose photo</span>
+                        <span class="file-upload-name" id="report-photo-name">No photo selected · JPG or PNG, up to 8 MB</span>
+                        <input id="report-photo" type="file" accept="image/*" capture="environment">
+                    </label>
+                    <div id="report-photo-preview" class="report-photo-preview"></div>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="step-panel" data-step="2">
+                    <h2>When did the power go out?</h2>
+                    <label for="outage-started-at">Approximate start time (optional)</label>
+                    <input id="outage-started-at" type="datetime-local">
+                    <div class="chip-row" data-group="when">
+                        <button class="chip active" type="button">Just now</button>
+                        <button class="chip" type="button">15 minutes ago</button>
+                        <button class="chip" type="button">1 hour ago</button>
+                        <button class="chip" type="button">Several hours ago</button>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="step-panel" data-step="3">
+                    <h2>Add details</h2>
+                    <label for="households">Households affected (estimate)</label>
+                    <div class="stepper">
+                        <button type="button" id="hh-minus" aria-label="Fewer households">−</button>
+                        <input id="households" type="number" min="1" max="500" value="10">
+                        <button type="button" id="hh-plus" aria-label="More households">＋</button>
+                    </div>
+
+                    <label>What do you think caused it?</label>
+                    <div class="chip-row" data-group="cause">
+                        <button class="chip active" type="button">Unknown</button>
+                        <button class="chip" type="button">Storm or strong wind</button>
+                        <button class="chip" type="button">Fallen pole or wires</button>
+                        <button class="chip" type="button">Transformer fault</button>
+                    </div>
+
+                    <label for="notes">Notes (optional)</label>
+                    <textarea id="notes" rows="2" placeholder="Anything the repair crew should know"></textarea>
+
+                    <p class="report-summary" id="report-summary"></p>
+                </div>
+
+                <div class="report-actions">
+                    <button class="ghost-button" id="report-back" type="button" hidden>Back</button>
+                    <button class="primary-button" id="report-next" type="button">Next step</button>
+                </div>
+            </section>
+
+            <section class="feedback-panel spot">
+                <div class="feedback-heading">
+                    <div>
+                        <h2>Community feedback</h2>
+                        <p>Report an exact street or landmark if there is a brownout nearby.</p>
+                    </div>
+                </div>
+                <form id="feedback-form" class="feedback-form" novalidate>
+                    <div>
+                        <label for="feedback-barangay">Barangay</label>
+                        <select id="feedback-barangay" required></select>
+                    </div>
+                    <div>
+                        <label for="feedback-location">Street or landmark</label>
+                        <input id="feedback-location" type="text" placeholder="Example: Near P. Burgos Street" autocomplete="off" required>
+                    </div>
+                    <div class="feedback-message">
+                        <label for="feedback-comment">Comment</label>
+                        <textarea id="feedback-comment" rows="3" placeholder="Describe the brownout or share an update..." required></textarea>
+                    </div>
+                    <button class="primary-button" type="submit">Post feedback</button>
+                    <a class="ghost-button sms-feedback" id="sms-feedback" href="sms:?&body=PowerGrid brownout report">Send report by SMS</a>
+                </form>
+                <div class="feedback-list-heading">
+                    <h3>Recent whereabouts reports</h3>
+                    <button class="ghost-button" id="feedback-clear" type="button">Clear all</button>
+                </div>
+                <div id="feedback-list" class="feedback-list"></div>
+            </section>
+        </section>
+
+        <!-- ===================== NETWORK ===================== -->
+        <section class="page" id="network-page">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · BATANGAS CITY</p>
+                    <h1>Network Monitor (Simulated)</h1>
+                </div>
+                <div class="live-status"><span></span> LIVE</div>
+            </header>
+
+            <section class="announcement spot">
+                <span class="speaker">⌁</span>
+                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+            </section>
+            <p class="network-intro">This browser simulates feeder nodes. Switch a feeder to “Cut link” to mark its barangays as brownout areas and create demo reports.</p>
+
+            <div class="network-layout">
+                <section class="network-board spot">
+                    <div class="substation">SUBSTATION · ONLINE</div>
+                    <div class="network-connectors"><i></i><i></i><i></i></div>
+                    <div class="feeders">
+                        <article class="feeder spot">
+                            <h3>Feeder 1</h3>
+                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                        </article>
+                        <article class="feeder spot">
+                            <h3>Feeder 2</h3>
+                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                        </article>
+                        <article class="feeder spot">
+                            <h3>Feeder 3</h3>
+                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                        </article>
+                    </div>
+                    <div class="network-barangays">
+                        <div class="net-col">
+                            <span class="net-label">Powered by Feeder 1</span>
+                            <button class="net-brgy" type="button" data-barangay="Poblacion"><span>Poblacion</span><small>Powered</small></button>
+                            <button class="net-brgy" type="button" data-barangay="Alangilan"><span>Alangilan</span><small>Powered</small></button>
+                        </div>
+                        <div class="net-col">
+                            <span class="net-label">Powered by Feeder 2</span>
+                            <button class="net-brgy" type="button" data-barangay="Pallocan West"><span>Pallocan West</span><small>Powered</small></button>
+                            <button class="net-brgy" type="button" data-barangay="Kumintang Ibaba"><span>Kumintang Ibaba</span><small>Powered</small></button>
+                        </div>
+                        <div class="net-col">
+                            <span class="net-label">Powered by Feeder 3</span>
+                            <button class="net-brgy" type="button" data-barangay="Bolbok"><span>Bolbok</span><small>Powered</small></button>
+                            <button class="net-brgy" type="button" data-barangay="Sta. Rita Karsada"><span>Sta. Rita Karsada</span><small>Powered</small></button>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="network-side">
+                    <section class="spot">
+                        <h3>Event log</h3>
+                        <ul id="event-log" class="log"></ul>
+                    </section>
+                    <section class="spot">
+                        <h3>Protocols in use</h3>
+                        <div class="protocols">
+                            <button type="button" class="proto" data-info="HTTPS carries reports and admin actions securely to the server.">HTTPS</button>
+                            <button type="button" class="proto" data-info="WebSocket pushes live outage updates to every open map.">WebSocket</button>
+                            <button type="button" class="proto" data-info="MQTT (simulated) is how feeder nodes would send small heartbeat messages.">MQTT (simulated)</button>
+                        </div>
+                    </section>
+                </aside>
+            </div>
+        </section>
+
+        <!-- ===================== ADMIN ===================== -->
+        <section class="page" id="admin-page">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · BATANGAS CITY</p>
+                    <h1>Admin Board</h1>
+                </div>
+                <div class="live-status"><span></span> LIVE</div>
+            </header>
+
+            <section class="announcement spot">
+                <span class="speaker">⌁</span>
+                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+            </section>
+            <p class="network-intro">Each report moves left to right as staff work on it. Use the bright purple button to move a card forward, or click a card title to find it on the map.</p>
+
+            <div class="admin-columns">
+                <section class="admin-column reported" data-status="reported">
+                    <h3>Reported <span class="count">0</span></h3>
+                    <div class="cards"></div>
+                </section>
+
+                <section class="admin-column verified" data-status="verified">
+                    <h3>Verified <span class="count">0</span></h3>
+                    <div class="cards"></div>
+                </section>
+
+                <section class="admin-column repair" data-status="repair">
+                    <h3>Under Repair <span class="count">0</span></h3>
+                    <div class="cards"></div>
+                </section>
+
+                <section class="admin-column restored" data-status="restored">
+                    <h3>Restored <span class="count">0</span></h3>
+                    <div class="cards"></div>
+                </section>
+            </div>
+            <section class="admin-forecast spot">
+                <h3>Barangay risk and restoration estimates</h3>
+                <div id="admin-forecast-grid" class="admin-forecast-grid"></div>
+            </section>
+
+            <section class="announcement-post spot">
+                <h3>Post an announcement</h3>
+                <select id="announcement-type" aria-label="Announcement type">
+                    <option value="maintenance">Scheduled maintenance</option>
+                    <option value="weather">Weather advisory</option>
+                    <option value="general">General update</option>
+                </select>
+                <input id="announcement-text" type="text" placeholder="Example: Scheduled maintenance on Saturday 8 AM to 12 PM" autocomplete="off">
+                <button class="primary-button" id="post-announcement" type="button">Post announcement</button>
+                <div id="announcement-list" class="announcement-list"></div>
+            </section>
+
+            <section class="admin-tools spot">
+                <h2>System management</h2>
+                <details>
+                    <summary>Manage barangays</summary>
+                    <form id="area-form" class="admin-inline-form">
+                        <input id="area-name" type="text" placeholder="New barangay name" required>
+                        <input id="area-lat" type="number" step="0.0001" min="13.65" max="13.84" placeholder="Latitude" aria-label="Latitude">
+                        <input id="area-lng" type="number" step="0.0001" min="120.96" max="121.16" placeholder="Longitude" aria-label="Longitude">
+                        <select id="area-feeder" aria-label="Assign feeder">
+                            <option value="0">Feeder 1</option>
+                            <option value="1">Feeder 2</option>
+                            <option value="2">Feeder 3</option>
+                        </select>
+                        <button class="primary-button" type="submit">Add area</button>
+                    </form>
+                    <div id="area-admin-list" class="admin-list"></div>
+                </details>
+                <details>
+                    <summary>Manage users</summary>
+                    <p class="admin-help">Demo-only account list. User authentication and permissions must be enforced by a backend before deployment.</p>
+                    <div id="user-admin-list" class="admin-list"></div>
+                </details>
+            </section>
+        </section>
+    </main>
+
+    <div class="toast-wrap" id="toasts" aria-live="polite"></div>
+    <div class="date-picker" id="date-picker" role="dialog" aria-label="Choose a date" hidden></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
