@@ -199,6 +199,12 @@ body.auth-page {
 }
 .field select option { color: var(--text); background: #fff; }
 .field input::placeholder { color: #8793a0; }
+.pw-toggle {
+    border: 1px solid var(--line-strong);
+    color: var(--purple-deep);
+    background: #f5f8fa;
+}
+.pw-toggle:hover { background: #eaf0f4; }
 .field-error { color: #b42332; }
 .form-error { color: #b42332; }
 .form-error:not(:empty) {
