@@ -26,7 +26,7 @@ if (missingIds.length) {
 
 const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 
-// Who is logged in (auth.js sends everyone else to login.html)
+// Who is logged in (Auth.js sends everyone else to Login.html)
 const user = Auth.currentUser();
 if (!user) throw new Error("Not logged in");
 const isStaff = user.role === "admin";
@@ -1647,7 +1647,7 @@ document.addEventListener("pointerdown", (e) => {
 $("#logout-button").addEventListener("click", () => {
     document.body.classList.add("signing-out");
     Auth.logout();
-    setTimeout(() => location.replace("login.html"), 380);
+    setTimeout(() => location.replace("Login.html"), 380);
 });
 
 if (sessionStorage.getItem("pg_welcome")) {

@@ -1,7 +1,6 @@
 "use strict";
 
 const Auth = (() => {
-    const USERS_KEY = "powergrid_users";
     const SESSION_KEY = "powergrid_session";
 
     const BARANGAYS = [
@@ -21,39 +20,45 @@ const Auth = (() => {
         role: "admin"
     };
 
-    const read = (key, fallback) => {
-        try {
-            const value = localStorage.getItem(key);
-            return value ? JSON.parse(value) : fallback;
-        } catch {
-            return fallback;
-        }
-    };
-
     const readSession = () => {
-        let session = null;
         try {
-            const local = read(SESSION_KEY, null);
-            if (local) session = local;
-            else {
-                const temporary = sessionStorage.getItem(SESSION_KEY);
-                if (temporary) session = JSON.parse(temporary);
-            }
+            const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
+            const session = raw ? JSON.parse(raw) : null;
+            return session && session.user && session.token ? session : null;
         } catch {
-            session = null;
+            return null;
         }
-        return session;
     };
 
-    const saveSession = (user, remember) => {
+    const saveSession = (user, token, remember) => {
         sessionStorage.removeItem(SESSION_KEY);
         localStorage.removeItem(SESSION_KEY);
-        const session = JSON.stringify(user);
+        const session = JSON.stringify({ user, token });
         if (remember) localStorage.setItem(SESSION_KEY, session);
         else sessionStorage.setItem(SESSION_KEY, session);
     };
 
     const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+    const OFFLINE = "Cannot reach the login server. Start it with npm run dev.";
+
+    const api = async (url, body, token) => {
+        const headers = {};
+        if (body !== undefined) headers["Content-Type"] = "application/json";
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        try {
+            const response = await fetch(url, {
+                method: body === undefined ? "GET" : "POST",
+                headers,
+                credentials: "same-origin",
+                body: body === undefined ? undefined : JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            return { status: response.status, data };
+        } catch {
+            return { status: 0, data: {} };
+        }
+    };
 
     const passwordStrength = (password) => {
         if (!password) return 0;
@@ -67,17 +72,13 @@ const Auth = (() => {
     const validatePassword = (password) =>
         password.length >= 8 && /[0-9]/.test(password);
 
-    const getBarangays = () => {
-        try {
-            const saved = JSON.parse(localStorage.getItem("powergrid_areas"));
-            if (Array.isArray(saved)) {
-                const names = [...new Set(saved.map((area) => area && area.name).filter((name) => typeof name === "string"))];
-                if (names.length) return names;
-            }
-        } catch {
-            // Fall back to the built-in registration list.
+    const getBarangays = async () => {
+        const { status, data } = await api("/api/barangays");
+        if (status === 0) throw new Error(OFFLINE);
+        if (!data.ok || !Array.isArray(data.barangays)) {
+            throw new Error(data.error || "Could not load barangays.");
         }
-        return [...BARANGAYS];
+        return data.barangays.map((barangay) => barangay.name);
     };
 
     return {
@@ -88,11 +89,21 @@ const Auth = (() => {
 
         currentUser() {
             const session = readSession();
-            return session && session.email ? session : null;
+            return session ? session.user : null;
         },
 
-        guard() {
-            if (!this.currentUser()) location.replace("login.html");
+        async guard() {
+            const session = readSession();
+            if (!session) return location.replace("Login.html");
+            const { status, data } = await api("/api/auth/me", undefined, session.token);
+            if (status === 401) {
+                localStorage.removeItem(SESSION_KEY);
+                sessionStorage.removeItem(SESSION_KEY);
+                return location.replace("Login.html");
+            }
+            if (data.user) {
+                saveSession(data.user, session.token, Boolean(localStorage.getItem(SESSION_KEY)));
+            }
         },
 
         logout() {
@@ -101,56 +112,29 @@ const Auth = (() => {
         },
 
         async login(email, password, remember = false) {
-            await new Promise((resolve) => setTimeout(resolve, 180));
-            email = normalizeEmail(email);
-            password = String(password || "");
-
-            if (email === normalizeEmail(DEMO_ADMIN.email) && password === DEMO_ADMIN.password) {
-                saveSession(DEMO_ADMIN, remember);
-                return { ok: true, user: DEMO_ADMIN };
-            }
-
-            const users = read(USERS_KEY, []);
-            const user = users.find((item) => normalizeEmail(item.email) === email);
-            if (!user || user.password !== password) {
-                return { ok: false, error: "Email or password is incorrect." };
-            }
-
-            const sessionUser = { ...user };
-            delete sessionUser.password;
-            saveSession(sessionUser, remember);
-            return { ok: true, user: sessionUser };
+            const { status, data } = await api("/api/auth/login", {
+                email: normalizeEmail(email),
+                password: String(password || ""),
+                remember
+            });
+            if (status === 0) return { ok: false, error: OFFLINE };
+            if (!data.ok) return { ok: false, error: data.error || "Login failed." };
+            saveSession(data.user, data.token, remember);
+            return { ok: true, user: data.user };
         },
 
         async register({ name, email, barangay, password, confirm }) {
-            await new Promise((resolve) => setTimeout(resolve, 180));
-            const errors = {};
-            name = String(name || "").trim();
-            email = normalizeEmail(email);
-            password = String(password || "");
-            confirm = String(confirm || "");
-
-            if (name.length < 2) errors.name = "Enter your full name.";
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.email = "Enter a valid email address.";
-            if (!getBarangays().includes(barangay)) errors.barangay = "Choose a barangay.";
-            if (!validatePassword(password)) errors.password = "Use at least 8 characters and a number.";
-            if (confirm !== password) errors.confirm = "Passwords do not match.";
-
-            const users = read(USERS_KEY, []);
-            if (email === normalizeEmail(DEMO_ADMIN.email) || users.some((item) => normalizeEmail(item.email) === email)) {
-                errors.email = "An account with this email already exists.";
-            }
-
-            if (Object.keys(errors).length) return { ok: false, errors };
-
-            const user = { name, email, barangay, password, role: "resident" };
-            users.push(user);
-            localStorage.setItem(USERS_KEY, JSON.stringify(users));
-
-            const sessionUser = { ...user };
-            delete sessionUser.password;
-            saveSession(sessionUser, false);
-            return { ok: true, user: sessionUser };
+            const { status, data } = await api("/api/auth/register", {
+                name,
+                email: normalizeEmail(email),
+                barangay,
+                password,
+                confirm
+            });
+            if (status === 0) return { ok: false, errors: { email: OFFLINE } };
+            if (!data.ok) return { ok: false, errors: data.errors || { email: data.error || "Registration failed." } };
+            saveSession(data.user, data.token, false);
+            return { ok: true, user: data.user };
         }
     };
 })();

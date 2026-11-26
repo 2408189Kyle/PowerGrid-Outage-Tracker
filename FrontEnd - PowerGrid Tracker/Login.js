@@ -17,12 +17,16 @@ let mode = "login";
 let panelToken = 0;
 
 /* ---------- barangay list + demo account ---------- */
-Auth.getBarangays().forEach((name) => {
-    const option = document.createElement("option");
-    option.value = name;
-    option.textContent = name;
-    $("#reg-barangay").append(option);
-});
+Auth.getBarangays()
+    .then((names) => names.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        $("#reg-barangay").append(option);
+    }))
+    .catch((error) => {
+        $("#register-error").textContent = error.message;
+    });
 $("#demo-email").textContent = Auth.DEMO_ADMIN.email;
 $("#demo-password").textContent = Auth.DEMO_ADMIN.password;
 
