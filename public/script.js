@@ -11,7 +11,7 @@ const esc = (text) =>
     String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // If index.html is an older copy, stop with a clear message instead of half-working.
-const REQUIRED_IDS = ["stat-active", "outage-card", "manage-button", "event-log", "toasts", "report-next", "post-announcement", "logout-button", "user-name"];
+const REQUIRED_IDS = ["stat-active", "outage-card", "manage-button", "event-log", "toasts", "report-next", "post-announcement", "logout-button", "user-name", "profile-open", "profile-dialog"];
 const missingIds = REQUIRED_IDS.filter((id) => !document.getElementById(id));
 if (missingIds.length) {
     document.body.insertAdjacentHTML(
@@ -29,16 +29,48 @@ const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 const user = Auth.currentUser();
 if (!user) throw new Error("Not logged in");
 const isStaff = user.role === "admin";
+let profileAvatarObjectUrl = null;
+let profilePreviewObjectUrl = null;
 document.body.classList.toggle("is-staff", isStaff);
-$("#user-avatar").textContent = user.name.trim().charAt(0).toUpperCase();
 $("#user-name").textContent = user.name;
 $("#user-name").title = user.email;
 $("#user-role").textContent = isStaff ? "Staff" : `Resident · ${user.barangay}`;
+
+function renderProfileAvatar() {
+    const initial = $("#user-avatar-initial");
+    const image = $("#user-avatar-image");
+    initial.textContent = user.name.trim().charAt(0).toUpperCase();
+    initial.hidden = false;
+    image.hidden = true;
+    image.removeAttribute("src");
+    if (profileAvatarObjectUrl) {
+        URL.revokeObjectURL(profileAvatarObjectUrl);
+        profileAvatarObjectUrl = null;
+    }
+    if (!user.profile_photo_url) return;
+
+    const photoUrl = user.profile_photo_url;
+    Auth.requestImage(photoUrl).then((objectUrl) => {
+        if (user.profile_photo_url !== photoUrl) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+        }
+        profileAvatarObjectUrl = objectUrl;
+        image.src = objectUrl;
+        image.hidden = false;
+        initial.hidden = true;
+    }).catch((error) => {
+        console.error("Could not load profile picture:", error.message);
+    });
+}
+
+renderProfileAvatar();
 
 /* ---------- data ---------- */
 const STATUS_ORDER = ["reported", "verified", "repair", "restored"];
 const STATUS_LABEL = { reported: "Reported", verified: "Verified", repair: "Under Repair", restored: "Restored" };
 const ETA_BY_STATUS = { reported: "TBD", verified: "~1h 30m", repair: "~45m", restored: "Restored" };
+const API_STATUS = { reported: "Reported", verified: "Verified", repair: "Under Repair", restored: "Restored" };
 
 function estimateRestoration(outage) {
     if (outage.status === "restored") return "Restored";
@@ -64,25 +96,14 @@ const BARANGAYS = {
     "Bolbok":            { coords: [13.7722, 121.0528], feeder: 2 },
     "Sta. Rita Karsada": { coords: [13.7460, 121.0690], feeder: 2 }
 };
-try {
-    const savedAreas = JSON.parse(localStorage.getItem("powergrid_areas"));
-    const validAreas = Array.isArray(savedAreas)
-        ? savedAreas.filter((area) => area && typeof area.name === "string" && Array.isArray(area.coords) && Number.isInteger(area.feeder))
-        : [];
-    if (validAreas.length) {
-        Object.keys(BARANGAYS).forEach((name) => delete BARANGAYS[name]);
-        validAreas.forEach((area) => {
-            BARANGAYS[area.name] = { coords: area.coords, feeder: Math.max(0, Math.min(2, area.feeder)) };
-        });
-    }
-} catch {
-    // Keep the built-in barangay list when saved data is invalid.
-}
+const feederRecords = [];
 
 const feeders = [0, 1, 2].map(() => ({ online: true, latency: 18, loss: 0 }));
 const outages = [];
+const reportPhotoUrls = new Map();
+let photoLoadWarningShown = false;
 let nextId = 1;
-let selectedId = 1;
+let selectedId = 0;
 let filter = "all";
 let lastChangedId = null;
 let map = null;
@@ -90,16 +111,77 @@ let markerLayer = null;
 const mapArea = $("#map-area");
 let mapPlaceholder = null;
 let mapFullscreen = false;
-const FEEDBACK_KEY = "powergrid_feedback";
 const FEEDBACK_PENDING_KEY = "powergrid_feedback_pending";
 let feedback = [];
 let pendingFeedback = [];
+const OFFLINE_REPORT_DB = "powergrid-offline-reports";
+const OFFLINE_REPORT_STORE = "reports";
+let offlineReportDb;
 
-try {
-    feedback = JSON.parse(localStorage.getItem(FEEDBACK_KEY)) || [];
-} catch {
-    feedback = [];
+function openOfflineReportDb() {
+    if (!("indexedDB" in window)) {
+        return Promise.reject(new Error("This browser does not support saving reports offline."));
+    }
+    if (!offlineReportDb) {
+        offlineReportDb = new Promise((resolve, reject) => {
+            const request = indexedDB.open(OFFLINE_REPORT_DB, 1);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(OFFLINE_REPORT_STORE)) {
+                    request.result.createObjectStore(OFFLINE_REPORT_STORE, { keyPath: "id" });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("Could not open offline report storage."));
+            request.onblocked = () => reject(new Error("Offline report storage is busy in another tab."));
+        }).catch((error) => {
+            offlineReportDb = null;
+            throw error;
+        });
+    }
+    return offlineReportDb;
 }
+
+function withOfflineReports(mode, action) {
+    return openOfflineReportDb().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(OFFLINE_REPORT_STORE, mode);
+        let result;
+        const request = action(transaction.objectStore(OFFLINE_REPORT_STORE));
+        request.onsuccess = () => { result = request.result; };
+        request.onerror = () => reject(request.error || new Error("Could not access offline report storage."));
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || new Error("Offline report storage failed."));
+        transaction.onabort = () => reject(transaction.error || new Error("Offline report storage was interrupted."));
+    }));
+}
+
+function readOfflineReport(id) {
+    return withOfflineReports("readonly", (store) => store.get(id));
+}
+
+function readAllOfflineReports() {
+    return withOfflineReports("readonly", (store) => store.getAll());
+}
+
+function writeOfflineReport(record) {
+    return withOfflineReports("readwrite", (store) => store.put(record));
+}
+
+function deleteOfflineReport(id) {
+    return withOfflineReports("readwrite", (store) => store.delete(id));
+}
+
+function enqueueOfflineReport(record, draftId) {
+    return openOfflineReportDb().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(OFFLINE_REPORT_STORE, "readwrite");
+        const store = transaction.objectStore(OFFLINE_REPORT_STORE);
+        store.put(record);
+        store.delete(draftId);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error("Could not queue the outage report."));
+        transaction.onabort = () => reject(transaction.error || new Error("Could not queue the outage report."));
+    }));
+}
+
 try {
     pendingFeedback = JSON.parse(localStorage.getItem(FEEDBACK_PENDING_KEY)) || [];
 } catch {
@@ -140,32 +222,75 @@ function addOutage({ barangay, address, households, status = "reported", eta, au
     return outage;
 }
 
-// Starting sample data (same five reports as before)
-addOutage({ barangay: "Poblacion",       address: "P. Burgos Street",    households: 48, status: "verified", eta: "1h 10m", since: "Earlier today" });
-addOutage({ barangay: "Kumintang Ibaba", address: "Kumintang Road",      households: 12, status: "reported", eta: "55m",    since: "Earlier today" });
-addOutage({ barangay: "Alangilan",       address: "Alangilan Main Road", households: 35, status: "repair",   eta: "2h",     since: "Earlier today" });
-addOutage({ barangay: "Bolbok",          address: "Bolbok Crossing",     households: 20, status: "restored", eta: "Restored", since: "Earlier today" });
-addOutage({ barangay: "Pallocan West",   address: "Pallocan Road",       households: 7,  status: "reported", eta: "45m",    since: "Earlier today" });
+function toOutage(incident) {
+    const status = incident.ui_status || "reported";
+    const coords = [Number(incident.latitude), Number(incident.longitude)];
+    return {
+        id: Number(incident.id),
+        barangay: incident.barangay,
+        address: incident.landmark || (incident.source === "system" ? "Detected by network monitor" : "Location not provided"),
+        households: Number(incident.est_households) || 0,
+        status,
+        eta: estimateRestoration({ status, households: Number(incident.est_households) || 0 }),
+        auto: incident.source === "system" ? 0 : null,
+        cause: incident.cause || "Unknown",
+        since: "Reported",
+        reporter: incident.reporter || null,
+        notes: incident.notes || "",
+        photo: null,
+        photoUrl: incident.photo_url || null,
+        startedAt: incident.started_at || null,
+        createdAt: incident.created_at || incident.started_at || new Date().toISOString(),
+        reportCount: Number(incident.report_count) || 1,
+        coords
+    };
+}
 
-try {
-    const saved = JSON.parse(localStorage.getItem("powergrid_live_state"));
-    if (saved && Array.isArray(saved.outages) && Array.isArray(saved.feeders)) {
-        outages.splice(0, outages.length, ...saved.outages);
-        outages.forEach((outage) => {
-            outage.createdAt = outage.createdAt || new Date().toISOString();
-            outage.reportCount = outage.reportCount || 1;
-            outage.notes = outage.notes || "";
-            outage.photo = outage.photo || null;
-            outage.startedAt = outage.startedAt || null;
-            outage.eta = estimateRestoration(outage);
-        });
-        saved.feeders.forEach((f, i) => {
-            if (feeders[i]) Object.assign(feeders[i], f);
-        });
-        nextId = outages.reduce((max, o) => Math.max(max, Number(o.id) || 0), 0) + 1;
-        selectedId = outages.some((o) => o.id === saved.selectedId) ? saved.selectedId : outages[0]?.id || 0;
+async function loadIncidents(showError = true) {
+    try {
+        const response = await Auth.request("/api/incidents");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.incidents)) {
+            throw new Error(response.data.error || "Could not load outage reports.");
+        }
+
+        const loaded = response.data.incidents.map(toOutage);
+        const activePhotoUrls = new Set(loaded.map((outage) => outage.photoUrl).filter(Boolean));
+        let photoErrors = 0;
+        await Promise.all(loaded.map(async (outage) => {
+            if (!outage.photoUrl) return;
+            try {
+                if (!reportPhotoUrls.has(outage.photoUrl)) {
+                    reportPhotoUrls.set(outage.photoUrl, await Auth.requestImage(outage.photoUrl));
+                }
+                outage.photo = reportPhotoUrls.get(outage.photoUrl);
+            } catch (error) {
+                photoErrors++;
+                console.error("Could not load incident photo:", error.message);
+            }
+        }));
+        for (const [url, objectUrl] of reportPhotoUrls) {
+            if (!activePhotoUrls.has(url)) {
+                URL.revokeObjectURL(objectUrl);
+                reportPhotoUrls.delete(url);
+            }
+        }
+        outages.splice(0, outages.length, ...loaded);
+        nextId = outages.reduce((max, outage) => Math.max(max, outage.id), 0) + 1;
+        if (!outages.some((outage) => outage.id === selectedId)) {
+            selectedId = outages[0] ? outages[0].id : 0;
+        }
+        renderAll();
+        if (photoErrors && !photoLoadWarningShown) {
+            toast("Some report photos could not be loaded.", "danger");
+            photoLoadWarningShown = true;
+        } else if (!photoErrors) {
+            photoLoadWarningShown = false;
+        }
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load outage reports.", "danger");
+        return false;
     }
-} catch {
 }
 
 function toast(message, type = "info") {
@@ -263,6 +388,7 @@ function showPage(name) {
         return 0;
     }
     const next = $(`#${name}-page`);
+    if (!next) return 0;
     const current = $(".page.view-active");
     const token = ++pageToken;
 
@@ -301,14 +427,18 @@ window.addEventListener("resize", syncSliders);
 window.addEventListener("load", syncSliders);
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncSliders);
 
-// Keyboard shortcuts: 1 Live Map, 2 Report, 3 Network, 4 Admin
+// Keyboard shortcuts: 1 Live Map, 2 Report, 3 Admin
 document.addEventListener("keydown", (e) => {
+    if (!$("#profile-dialog").hidden) {
+        if (e.key === "Escape") closeProfileDialog();
+        return;
+    }
     if (e.key === "Escape" && mapFullscreen) {
         setMapFullscreen(false);
         return;
     }
     if (e.target.matches("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const pages = { "1": "map", "2": "report", "3": "network", "4": "admin" };
+    const pages = { "1": "map", "2": "report", "3": "admin" };
     if (pages[e.key]) showPage(pages[e.key]);
 });
 
@@ -322,6 +452,58 @@ document.addEventListener("pointermove", (e) => {
 });
 
 /* ---------- map ---------- */
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+const reverseGeocodeCache = new Map();
+let reverseGeocodeQueue = Promise.resolve();
+let lastReverseGeocodeAt = 0;
+let locationLookupRequestId = 0;
+let autoDetectedLandmark = "";
+
+function formatReverseGeocodeResult(result) {
+    const address = result.address || {};
+    const road = address.road || address.pedestrian || address.footway ||
+        address.path || address.residential || address.highway;
+    const street = [address.house_number, road].filter(Boolean).join(" ");
+    const area = address.neighbourhood || address.suburb || address.quarter ||
+        address.village || address.town || address.city_district;
+    const location = [result.name, street, area]
+        .filter((part, index, parts) => part && parts.indexOf(part) === index)
+        .join(", ") || String(result.display_name || "").split(",").slice(0, 3).join(",").trim();
+    return location.slice(0, 200);
+}
+
+function reverseGeocodeLocation(coords) {
+    const cacheKey = coords.map((coordinate) => coordinate.toFixed(5)).join(",");
+    if (reverseGeocodeCache.has(cacheKey)) {
+        return Promise.resolve(reverseGeocodeCache.get(cacheKey));
+    }
+
+    const request = reverseGeocodeQueue.then(async () => {
+        const delay = Math.max(0, lastReverseGeocodeAt + NOMINATIM_MIN_INTERVAL_MS - Date.now());
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+
+        lastReverseGeocodeAt = Date.now();
+        const params = new URLSearchParams({
+            format: "jsonv2",
+            lat: String(coords[0]),
+            lon: String(coords[1]),
+            zoom: "18",
+            addressdetails: "1"
+        });
+        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?${params}`, {
+            headers: { Accept: "application/json" }
+        });
+        if (!response.ok) throw new Error(`Location lookup failed (${response.status}).`);
+
+        const result = await response.json();
+        const location = formatReverseGeocodeResult(result);
+        reverseGeocodeCache.set(cacheKey, location);
+        return location;
+    });
+    reverseGeocodeQueue = request.catch(() => {});
+    return request;
+}
+
 function initMap() {
     if (typeof L === "undefined") {
         $("#leaflet-map").innerHTML = '<div class="map-offline">The map needs an internet connection to load Leaflet and the map tiles.</div>';
@@ -333,7 +515,7 @@ function initMap() {
     map = L.map("leaflet-map", {
         zoomControl: false,
         attributionControl: true,
-        minZoom: 12,
+        minZoom: 13,
         maxZoom: 18,
         maxBounds: batangasCityBounds,
         maxBoundsViscosity: 1
@@ -342,11 +524,11 @@ function initMap() {
     L.control.zoom({ position: "bottomleft" }).addTo(map);
     window.outageMap = map;
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        minZoom: 12,
+    L.tileLayer("https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", {
+        minZoom: 13,
         maxZoom: 18,
         noWrap: true,
-        attribution: "&copy; OpenStreetMap contributors"
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles style by <a href="https://www.hotosm.org/">Humanitarian OpenStreetMap Team</a>, hosted by <a href="https://openstreetmap.fr/">OpenStreetMap France</a>'
     }).addTo(map);
 
     markerLayer = L.layerGroup().addTo(map);
@@ -354,13 +536,45 @@ function initMap() {
         if (!pinSelectionActive) return;
         report.coords = [event.latlng.lat, event.latlng.lng];
         report.pinSelected = true;
+        scheduleReportDraftSave();
         if (reportPinMarker) reportPinMarker.remove();
         reportPinMarker = L.marker(report.coords).addTo(map).bindTooltip("Report location", { permanent: true, direction: "top" });
-        $("#report-pin-status").textContent = `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`;
+        const pinStatus = `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`;
+        const landmarkInput = $("#landmark");
+        const landmarkBeforeLookup = landmarkInput.value.trim();
+        const canSuggestLandmark = !landmarkBeforeLookup || landmarkBeforeLookup === autoDetectedLandmark;
+        const lookupRequestId = ++locationLookupRequestId;
+        $("#report-pin-status").textContent = canSuggestLandmark
+            ? `${pinStatus}. Looking up a nearby street or landmark with OpenStreetMap…`
+            : `${pinStatus}. Your entered street or landmark was kept.`;
         pinSelectionActive = false;
         map.getContainer().style.cursor = "";
         $("#pin-return-report").hidden = false;
         toast("Report pin set. Return to the report form to continue.", "success");
+
+        if (canSuggestLandmark) {
+            reverseGeocodeLocation(report.coords).then((location) => {
+                if (lookupRequestId !== locationLookupRequestId || !report.pinSelected ||
+                    landmarkInput.value.trim() !== landmarkBeforeLookup) return;
+                if (!location) {
+                    $("#report-pin-status").textContent =
+                        `${pinStatus}. No street or landmark was found; enter one manually.`;
+                    return;
+                }
+
+                landmarkInput.value = location;
+                report.landmark = location;
+                autoDetectedLandmark = location;
+                scheduleReportDraftSave();
+                $("#report-pin-status").textContent =
+                    `${pinStatus}. Suggested location: ${location}. You can edit it.`;
+            }).catch((error) => {
+                if (lookupRequestId !== locationLookupRequestId || !report.pinSelected) return;
+                console.warn("Could not look up the pinned location:", error.message);
+                $("#report-pin-status").textContent =
+                    `${pinStatus}. Could not look up a street or landmark; enter one manually.`;
+            });
+        }
     });
 }
 
@@ -368,6 +582,7 @@ const markersById = new Map();
 let pinSelectionActive = false;
 let reportPinMarker = null;
 const mapSearch = { text: "", barangay: "", from: "", to: "" };
+if (location.hash === "#admin" && isStaff) showPage("admin");
 
 function setMapFullscreen(expanded) {
     if (expanded === mapFullscreen) return;
@@ -471,6 +686,7 @@ function showOnMap(id) {
 
 function renderCard(animate = false) {
     const o = outages.find((x) => x.id === selectedId);
+    $("#outage-card").hidden = !o;
     if (!o) return;
     $(".card-kicker").textContent = `SELECTED OUTAGE #${o.id}`;
     $("#card-name").textContent = o.barangay;
@@ -664,8 +880,10 @@ function renderStats() {
     tween($("#stat-active"), active.length);
     tween($("#stat-households"), active.reduce((sum, o) => sum + o.households, 0));
     tween($("#stat-restored"), outages.filter((o) => o.status === "restored").length);
-    const online = feeders.filter((f) => f.online).length;
-    $("#stat-feeders").innerHTML = `${online} <small>of ${feeders.length}</small>`;
+    if (isStaff) {
+        const online = feeders.filter((f) => f.online).length;
+        $("#stat-feeders").innerHTML = `${online} <small>of ${feeders.length}</small>`;
+    }
 }
 
 /* ---------- history and demo forecast ---------- */
@@ -799,17 +1017,26 @@ function flashCard(id) {
     card.classList.add("flash");
 }
 
-function moveOutage(outage, direction) {
+async function moveOutage(outage, direction) {
     const next = STATUS_ORDER[STATUS_ORDER.indexOf(outage.status) + direction];
     if (!next) return;
-    outage.status = next;
-    outage.eta = estimateRestoration(outage);
+    const response = await Auth.request(`/api/incidents/${outage.id}/status`, {
+        method: "PATCH",
+        body: { status: API_STATUS[next] }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not update incident status.", "danger");
+        return;
+    }
     lastChangedId = outage.id;
-    renderAll();
+    if (!await loadIncidents(false)) {
+        toast("Status updated, but the outage list could not be refreshed.", "danger");
+        return;
+    }
     toast(`#${outage.id} ${outage.barangay} → ${STATUS_LABEL[next]}`, next === "restored" ? "success" : "info");
 }
 
-$(".admin-columns").addEventListener("click", (e) => {
+$(".admin-columns").addEventListener("click", async (e) => {
     const card = e.target.closest(".report-card");
     if (!card) return;
     const outage = outages.find((o) => o.id === Number(card.dataset.id));
@@ -827,15 +1054,29 @@ $(".admin-columns").addEventListener("click", (e) => {
                 toast("Keep a location and enter 1–5000 households", "danger");
                 return;
             }
-            outage.address = address.trim();
-            outage.households = households;
-            outage.eta = estimateRestoration(outage);
-            renderAll();
+            const response = await Auth.request(`/api/incidents/${outage.id}`, {
+                method: "PATCH",
+                body: { landmark: address.trim(), households }
+            });
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                toast(response.data.error || "Could not update report.", "danger");
+                return;
+            }
+            if (!await loadIncidents(false)) {
+                toast("Report updated, but the outage list could not be refreshed.", "danger");
+                return;
+            }
             toast(`Report #${outage.id} updated`, "success");
         } else if (action === "delete" && confirm(`Delete report #${outage.id}?`)) {
-            outages.splice(outages.indexOf(outage), 1);
-            selectedId = outages[0] ? outages[0].id : 0;
-            renderAll();
+            const response = await Auth.request(`/api/incidents/${outage.id}`, { method: "DELETE" });
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                toast(response.data.error || "Could not delete report.", "danger");
+                return;
+            }
+            if (!await loadIncidents(false)) {
+                toast("Report deleted, but the outage list could not be refreshed.", "danger");
+                return;
+            }
             toast("Report deleted", "info");
         }
     } else if (e.target.closest("h4")) {
@@ -843,56 +1084,80 @@ $(".admin-columns").addEventListener("click", (e) => {
     }
 });
 
-const ANNOUNCEMENTS_KEY = "powergrid_announcements";
 let announcements = [];
-try {
-    announcements = JSON.parse(localStorage.getItem(ANNOUNCEMENTS_KEY)) || [];
-} catch {
-    announcements = [];
-}
-if (!announcements.length) {
-    announcements = [{ id: Date.now(), text: "Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.", createdAt: new Date().toISOString() }];
-}
 
 function renderAnnouncements() {
-    const newest = announcements[0];
+    const now = Date.now();
+    const newest = announcements
+        .filter((item) =>
+            (!item.starts_at || Date.parse(item.starts_at) <= now) &&
+            (!item.ends_at || Date.parse(item.ends_at) >= now)
+        )
+        .sort((a, b) => Date.parse(b.starts_at || b.created_at) - Date.parse(a.starts_at || a.created_at))[0];
     $$(".announcement p").forEach((p) => {
         const label = document.createElement("strong");
-        const typeLabels = { maintenance: "Maintenance:", weather: "Weather advisory:", general: "Update:" };
+        const typeLabels = { maintenance: "Maintenance:", advisory: "Advisory:" };
         label.textContent = newest ? typeLabels[newest.type] || "Announcement:" : "Announcement:";
-        p.replaceChildren(label, ` ${newest ? newest.text : "No current advisories."}`);
+        p.replaceChildren(label, ` ${newest ? `${newest.title} — ${newest.body}` : "No current advisories."}`);
     });
     const list = $("#announcement-list");
     list.innerHTML = announcements.map((item) => `
         <article class="announcement-item">
-            <span><strong>${esc(item.type || "general")}</strong> · ${esc(item.text)}<small>${esc(new Date(item.createdAt).toLocaleString())}</small></span>
-            <button type="button" class="back-button" data-announcement-edit="${item.id}">Edit</button>
-            <button type="button" class="back-button" data-announcement-delete="${item.id}">Delete</button>
+            <span><strong>${esc(item.title)}</strong> · ${esc(item.type)} · ${esc(item.body)}<small>${esc(new Date(item.created_at).toLocaleString())}</small></span>
+            <button type="button" class="back-button" data-announcement-edit="${Number(item.id)}">Edit</button>
+            <button type="button" class="back-button" data-announcement-delete="${Number(item.id)}">Delete</button>
         </article>`).join("") || '<p class="feedback-empty">No announcements.</p>';
 }
 
-function saveAnnouncements() {
-    localStorage.setItem(ANNOUNCEMENTS_KEY, JSON.stringify(announcements));
-    renderAnnouncements();
+async function loadAnnouncements(showError = true) {
+    try {
+        const endpoint = isStaff ? "/api/announcements/manage" : "/api/announcements";
+        const response = await Auth.request(endpoint);
+        if (response.status < 200 || response.status >= 300 ||
+            !response.data.ok || !Array.isArray(response.data.announcements)) {
+            throw new Error(response.data.error || "Could not load announcements.");
+        }
+        announcements = response.data.announcements;
+        renderAnnouncements();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load announcements.", "danger");
+        return false;
+    }
 }
 
-$("#announcement-list").addEventListener("click", (e) => {
+$("#announcement-list").addEventListener("click", async (e) => {
     const edit = e.target.closest("[data-announcement-edit]");
     const remove = e.target.closest("[data-announcement-delete]");
     if (edit) {
         const item = announcements.find((a) => a.id === Number(edit.dataset.announcementEdit));
         if (!item) return;
-        const text = prompt("Edit announcement:", item.text);
-        if (text === null || !text.trim()) return;
-        item.text = text.trim();
-        saveAnnouncements();
+        const body = prompt("Edit announcement:", item.body);
+        if (body === null || !body.trim()) return;
+        const response = await Auth.request(`/api/announcements/${item.id}`, {
+            method: "PATCH",
+            body: { body: body.trim() }
+        });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not update announcement.", "danger");
+            return;
+        }
+        await loadAnnouncements(false);
+        toast("Announcement updated", "success");
     } else if (remove) {
-        announcements = announcements.filter((a) => a.id !== Number(remove.dataset.announcementDelete));
-        saveAnnouncements();
+        const id = Number(remove.dataset.announcementDelete);
+        if (!confirm("Delete this announcement?")) return;
+        const response = await Auth.request(`/api/announcements/${id}`, { method: "DELETE" });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not delete announcement.", "danger");
+            return;
+        }
+        await loadAnnouncements(false);
+        toast("Announcement deleted", "info");
     }
 });
 
-function postAnnouncement() {
+async function postAnnouncement() {
     const input = $("#announcement-text");
     const text = input.value.trim();
     if (!text) {
@@ -900,8 +1165,20 @@ function postAnnouncement() {
         toast("Type an announcement first", "danger");
         return;
     }
-    announcements.unshift({ id: Date.now(), type: $("#announcement-type").value, text, createdAt: new Date().toISOString() });
-    saveAnnouncements();
+    const type = $("#announcement-type").value;
+    const response = await Auth.request("/api/announcements", {
+        method: "POST",
+        body: {
+            title: type === "maintenance" ? "Scheduled maintenance" : "Weather advisory",
+            body: text,
+            type
+        }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not post announcement.", "danger");
+        return;
+    }
+    await loadAnnouncements(false);
     $$(".announcement").forEach((banner) => {
         banner.classList.remove("ping");
         void banner.offsetWidth;
@@ -914,30 +1191,82 @@ function postAnnouncement() {
 renderAnnouncements();
 $("#post-announcement").addEventListener("click", postAnnouncement);
 $("#announcement-text").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") postAnnouncement();
+    if (e.key === "Enter") void postAnnouncement();
 });
 
 function renderAreaAdmin() {
     $("#area-admin-list").innerHTML = Object.entries(BARANGAYS).map(([name, area]) => `
         <div class="admin-list-row">
-            <span><strong>${esc(name)}</strong><small>Feeder ${area.feeder + 1} · ${area.coords.map((n) => Number(n).toFixed(4)).join(", ")}</small></span>
-            <button type="button" class="back-button" data-area-edit="${esc(name)}">Edit</button>
-            <button type="button" class="back-button" data-area-delete="${esc(name)}">Remove</button>
+            <span><strong>${esc(name)}</strong><small>${esc(area.feederName || `Feeder ${area.feeder + 1}`)} · approximate marker${area.boundaryAvailable ? " · sample boundary (not verified)" : " · no boundary data"}</small></span>
+            <button type="button" class="back-button" data-area-edit="${Number(area.id) || ""}" ${area.id ? "" : "disabled"}>Edit</button>
+            <button type="button" class="back-button" data-area-delete="${Number(area.id) || ""}" ${area.id ? "" : "disabled"}>Remove</button>
         </div>`).join("");
 }
 
-function saveAreas() {
-    localStorage.setItem("powergrid_areas", JSON.stringify(Object.entries(BARANGAYS).map(([name, area]) => ({
-        name, coords: area.coords, feeder: area.feeder
-    }))));
+function renderFeederOptions() {
+    const select = $("#area-feeder");
+    const current = select.value;
+    select.innerHTML = feederRecords.map((feeder) =>
+        `<option value="${Number(feeder.id)}">${esc(feeder.name)}</option>`
+    ).join("");
+    if (feederRecords.some((feeder) => String(feeder.id) === current)) select.value = current;
 }
 
-$("#area-form").addEventListener("submit", (e) => {
+async function loadBarangays(showError = true) {
+    try {
+        const [areaResponse, feederResponse] = await Promise.all([
+            Auth.request("/api/barangays"),
+            Auth.request("/api/barangays/feeders")
+        ]);
+        if (areaResponse.status < 200 || areaResponse.status >= 300 ||
+            !areaResponse.data.ok || !Array.isArray(areaResponse.data.barangays)) {
+            throw new Error(areaResponse.data.error || "Could not load barangays.");
+        }
+        if (feederResponse.status < 200 || feederResponse.status >= 300 ||
+            !feederResponse.data.ok || !Array.isArray(feederResponse.data.feeders)) {
+            throw new Error(feederResponse.data.error || "Could not load feeders.");
+        }
+        feederRecords.splice(0, feederRecords.length, ...feederResponse.data.feeders);
+        Object.keys(BARANGAYS).forEach((name) => delete BARANGAYS[name]);
+        areaResponse.data.barangays.forEach((area) => {
+            const feederIndex = feederRecords.findIndex((feeder) => Number(feeder.id) === Number(area.feeder_id));
+            const fallbackCoords = [13.7567, 121.0583];
+            BARANGAYS[area.name] = {
+                id: Number(area.id),
+                coords: Number.isFinite(area.latitude) && Number.isFinite(area.longitude)
+                    ? [area.latitude, area.longitude]
+                    : fallbackCoords,
+                feeder: Math.max(0, Math.min(2, feederIndex)),
+                feederId: Number(area.feeder_id),
+                feederName: area.feeder_name || feederRecords[feederIndex]?.name,
+                boundaryAvailable: area.boundary_available,
+                householdsEstimate: Number(area.households_estimate) || 1000
+            };
+        });
+        renderFeederOptions();
+        if (!Object.keys(BARANGAYS).length) throw new Error("No barangays are configured.");
+        defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
+        if (!BARANGAYS[report.barangay]) {
+            report.barangay = defaultBarangay;
+        }
+        report.coords = [...BARANGAYS[report.barangay].coords];
+        renderBarangayOptions();
+        renderAreaAdmin();
+        renderAll();
+        updateSmsLink();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load barangays.", "danger");
+        return false;
+    }
+}
+
+$("#area-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#area-name").value.trim();
     const lat = Number($("#area-lat").value);
     const lng = Number($("#area-lng").value);
-    if (!name || BARANGAYS[name] || Object.keys(BARANGAYS).some((area) => area.toLowerCase() === name.toLowerCase())) {
+    if (!name || Object.keys(BARANGAYS).some((area) => area.toLowerCase() === name.toLowerCase())) {
         toast("Enter a new, unique barangay name", "danger");
         return;
     }
@@ -948,49 +1277,71 @@ $("#area-form").addEventListener("submit", (e) => {
         return;
     }
     const coords = hasLat ? [lat, lng] : [13.7567, 121.0583];
-    if (!coords.every(Number.isFinite) || (hasLat && (lat < 13.65 || lat > 13.84 || lng < 120.96 || lng > 121.16))) {
+    const feederId = Number($("#area-feeder").value);
+    if (!coords.every(Number.isFinite) || (hasLat && (lat < 13.65 || lat > 13.84 || lng < 120.96 || lng > 121.16)) ||
+        !feederRecords.some((feeder) => Number(feeder.id) === feederId)) {
         toast("Use coordinates inside Batangas City", "danger");
         return;
     }
-    BARANGAYS[name] = { coords, feeder: Number($("#area-feeder").value) };
-    saveAreas();
+    const response = await Auth.request("/api/barangays", {
+        method: "POST",
+        body: { name, latitude: coords[0], longitude: coords[1], feeder_id: feederId }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not add barangay.", "danger");
+        return;
+    }
     $("#area-form").reset();
-    renderBarangayOptions();
-    renderAreaAdmin();
-    renderAll();
+    await loadBarangays(false);
     toast(`${name} added`, "success");
 });
 
-$("#area-admin-list").addEventListener("click", (e) => {
+$("#area-admin-list").addEventListener("click", async (e) => {
     const edit = e.target.closest("[data-area-edit]");
     const button = e.target.closest("[data-area-delete]");
     if (edit) {
-        const area = BARANGAYS[edit.dataset.areaEdit];
-        if (!area) return;
+        const id = Number(edit.dataset.areaEdit);
+        const entry = Object.entries(BARANGAYS).find(([, area]) => area.id === id);
+        if (!entry) return;
+        const [name, area] = entry;
         const latText = prompt("Latitude:", String(area.coords[0]));
         if (latText === null) return;
         const lngText = prompt("Longitude:", String(area.coords[1]));
         if (lngText === null) return;
-        const feederText = prompt("Feeder number (1–3):", String(area.feeder + 1));
+        const feederNumber = feederRecords.findIndex((feeder) => Number(feeder.id) === area.feederId) + 1;
+        const feederText = prompt(`Feeder number (1–${feederRecords.length}):`, String(feederNumber));
         if (feederText === null) return;
         const lat = Number(latText);
         const lng = Number(lngText);
-        const feederNumber = Number(feederText);
+        const nextFeederIndex = Number(feederText) - 1;
         if (!Number.isFinite(lat) || lat < 13.65 || lat > 13.84 || !Number.isFinite(lng) || lng < 120.96 || lng > 121.16 ||
-            !Number.isInteger(feederNumber) || feederNumber < 1 || feederNumber > 3) {
-            toast("Use valid Batangas City coordinates and feeder 1–3", "danger");
+            !Number.isInteger(nextFeederIndex) || !feederRecords[nextFeederIndex]) {
+            toast("Use valid Batangas City coordinates and feeder number", "danger");
             return;
         }
-        area.coords = [lat, lng];
-        area.feeder = feederNumber - 1;
-        saveAreas();
-        renderAreaAdmin();
-        renderAll();
-        toast(`${edit.dataset.areaEdit} updated`, "success");
+        const response = await Auth.request(`/api/barangays/${id}`, {
+            method: "PATCH",
+            body: {
+                name,
+                latitude: lat,
+                longitude: lng,
+                feeder_id: Number(feederRecords[nextFeederIndex].id),
+                households_estimate: area.householdsEstimate
+            }
+        });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not update barangay.", "danger");
+            return;
+        }
+        await loadBarangays(false);
+        toast(`${name} updated`, "success");
         return;
     }
     if (!button) return;
-    const name = button.dataset.areaDelete;
+    const id = Number(button.dataset.areaDelete);
+    const entry = Object.entries(BARANGAYS).find(([, area]) => area.id === id);
+    if (!entry) return;
+    const [name] = entry;
     if (outages.some((o) => o.barangay === name)) {
         toast("This area has outage history and cannot be removed", "danger");
         return;
@@ -1000,74 +1351,81 @@ $("#area-admin-list").addEventListener("click", (e) => {
         return;
     }
     if (!confirm(`Remove ${name} from the demo area list?`)) return;
-    delete BARANGAYS[name];
-    saveAreas();
-    renderBarangayOptions();
-    renderAreaAdmin();
-    renderAll();
+    const response = await Auth.request(`/api/barangays/${id}`, { method: "DELETE" });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not remove barangay.", "danger");
+        return;
+    }
+    await loadBarangays(false);
     toast(`${name} removed`, "info");
 });
 
+let managedUsers = [];
+
 function renderUserAdmin() {
-    let users = [];
-    try {
-        users = JSON.parse(localStorage.getItem("powergrid_users")) || [];
-    } catch {
-        users = [];
-    }
-    const allUsers = [Auth.DEMO_ADMIN, ...users];
-    $("#user-admin-list").innerHTML = allUsers.map((account) => `
+    $("#user-admin-list").innerHTML = managedUsers.map((account) => `
         <div class="admin-list-row">
-            <span><strong>${esc(account.name)}</strong><small>${esc(account.email)} · ${account.role === "admin" ? "Staff" : "Resident"}</small></span>
-            ${account.email === Auth.DEMO_ADMIN.email ? '<small>Demo admin</small>' :
-                `<button type="button" class="back-button" data-user-edit="${esc(account.email)}">Edit</button>
-                <button type="button" class="back-button" data-user-role="${esc(account.email)}">${account.role === "admin" ? "Make resident" : "Make staff"}</button>
-                <button type="button" class="back-button" data-user-delete="${esc(account.email)}">Delete</button>`}
+            <span><strong>${esc(account.name)}${String(account.id) === String(user.id) ? " (you)" : ""}</strong><small>${esc(account.email)} · ${account.role === "admin" ? "Staff" : "Resident"}${account.barangay ? ` · ${esc(account.barangay)}` : ""}${account.is_active ? "" : " · Deactivated"}</small></span>
+            ${String(account.id) === String(user.id) ? '<small>Current account</small>' :
+                `<button type="button" class="back-button" data-user-edit="${Number(account.id)}">Edit</button>
+                <button type="button" class="back-button" data-user-role="${Number(account.id)}">${account.role === "admin" ? "Make resident" : "Make staff"}</button>
+                <button type="button" class="back-button" data-user-active="${Number(account.id)}">${account.is_active ? "Deactivate" : "Reactivate"}</button>`}
         </div>`).join("") || '<p class="feedback-empty">No registered users.</p>';
 }
 
-$("#user-admin-list").addEventListener("click", (e) => {
+async function loadUsers(showError = true) {
+    try {
+        const response = await Auth.request("/api/users");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.users)) {
+            throw new Error(response.data.error || "Could not load user accounts.");
+        }
+        managedUsers = response.data.users;
+        renderUserAdmin();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load user accounts.", "danger");
+        return false;
+    }
+}
+
+$("#user-admin-list").addEventListener("click", async (e) => {
     const editButton = e.target.closest("[data-user-edit]");
     const roleButton = e.target.closest("[data-user-role]");
-    const deleteButton = e.target.closest("[data-user-delete]");
-    let users;
-    try {
-        users = JSON.parse(localStorage.getItem("powergrid_users")) || [];
-    } catch {
-        users = [];
-    }
-    const email = editButton ? editButton.dataset.userEdit : roleButton ? roleButton.dataset.userRole : deleteButton && deleteButton.dataset.userDelete;
-    const account = users.find((item) => item.email === email);
+    const activeButton = e.target.closest("[data-user-active]");
+    const id = Number(editButton ? editButton.dataset.userEdit :
+        roleButton ? roleButton.dataset.userRole : activeButton && activeButton.dataset.userActive);
+    const account = managedUsers.find((item) => Number(item.id) === id);
     if (!account) return;
-    if (email === user.email) {
-        toast("You cannot edit or remove your own account", "danger");
-        return;
-    }
+    let changes;
     if (editButton) {
         const name = prompt("User name:", account.name);
         if (name === null) return;
         const nextEmail = prompt("Email:", account.email);
         if (nextEmail === null) return;
         const normalizedEmail = nextEmail.trim().toLowerCase();
-        if (!name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
-            users.some((item) => item !== account && item.email.toLowerCase() === normalizedEmail)) {
-            toast("Enter a name and a unique valid email", "danger");
+        if (!name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+            toast("Enter a name and a valid email address", "danger");
             return;
         }
-        account.name = name.trim();
-        account.email = normalizedEmail;
+        changes = { name: name.trim(), email: normalizedEmail };
     } else if (roleButton) {
-        account.role = account.role === "admin" ? "resident" : "admin";
-    } else if (deleteButton) {
-        if (email === user.email || !confirm(`Delete account ${email}?`)) return;
-        users = users.filter((item) => item.email !== email);
+        changes = { role: account.role === "admin" ? "resident" : "admin" };
+    } else if (activeButton) {
+        const action = account.is_active ? "Deactivate" : "Reactivate";
+        if (!confirm(`${action} account ${account.email}?`)) return;
+        changes = { is_active: !account.is_active };
     }
-    localStorage.setItem("powergrid_users", JSON.stringify(users));
-    renderUserAdmin();
+    const response = await Auth.request(`/api/users/${id}`, { method: "PATCH", body: changes });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not update user account.", "danger");
+        return;
+    }
+    await loadUsers(false);
+    toast("User account updated", "success");
 });
 
 /* ---------- report wizard ---------- */
-const defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
+let defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
 const report = {
     step: 1,
     barangay: defaultBarangay,
@@ -1080,11 +1438,183 @@ const report = {
     pinSelected: false,
     startedAt: "",
     photo: null,
+    photoBlob: null,
+    photoName: "",
     photoLoading: false
 };
+let submittingReport = false;
+const reportOwner = String(user.email || user.id || "resident").trim().toLowerCase();
+const reportDraftId = `draft:${reportOwner}`;
+let reportDraftTouched = false;
+let reportDraftTimer = null;
+let syncingPendingReports = false;
+
+function currentReportDraft() {
+    return {
+        step: report.step,
+        barangay: report.barangay,
+        landmark: $("#landmark").value,
+        when: report.when,
+        households: clampHouseholds($("#households").value),
+        cause: report.cause,
+        notes: $("#notes").value,
+        coords: [...report.coords],
+        pinSelected: report.pinSelected,
+        startedAt: $("#outage-started-at").value,
+        photoBlob: report.photoBlob,
+        photoName: report.photoName
+    };
+}
+
+function hasReportDraftContent(draft) {
+    return Boolean(
+        String(draft.landmark || "").trim() ||
+        String(draft.notes || "").trim() ||
+        draft.startedAt ||
+        draft.photoBlob ||
+        draft.pinSelected ||
+        draft.step > 1 ||
+        draft.barangay !== defaultBarangay ||
+        draft.when !== "Just now" ||
+        draft.cause !== "Unknown" ||
+        draft.households !== 10
+    );
+}
+
+async function persistReportDraft() {
+    if (!reportDraftTouched) return;
+    const draft = currentReportDraft();
+    if (!hasReportDraftContent(draft)) {
+        await deleteOfflineReport(reportDraftId);
+        $("#report-draft-status").textContent = "Changes are saved on this device as you fill out the report.";
+        return;
+    }
+
+    await writeOfflineReport({
+        ...draft,
+        id: reportDraftId,
+        kind: "draft",
+        owner: reportOwner,
+        updatedAt: new Date().toISOString()
+    });
+    $("#report-draft-status").textContent = "Draft saved on this device. It has not been submitted.";
+}
+
+function scheduleReportDraftSave() {
+    reportDraftTouched = true;
+    clearTimeout(reportDraftTimer);
+    reportDraftTimer = setTimeout(() => {
+        persistReportDraft().catch((error) => {
+            console.error("Could not save outage report draft:", error.message);
+            $("#report-draft-status").textContent = `Could not save this draft locally: ${error.message}`;
+        });
+    }, 350);
+}
+
+async function restoreReportDraft() {
+    try {
+        const draft = await readOfflineReport(reportDraftId);
+        if (!draft || draft.kind !== "draft" || draft.owner !== reportOwner) return;
+
+        report.barangay = BARANGAYS[draft.barangay] ? draft.barangay : defaultBarangay;
+        report.landmark = String(draft.landmark || "");
+        report.when = String(draft.when || "Just now");
+        report.cause = String(draft.cause || "Unknown");
+        report.notes = String(draft.notes || "");
+        report.startedAt = String(draft.startedAt || "");
+        report.pinSelected = Boolean(draft.pinSelected);
+        report.coords = Array.isArray(draft.coords) && draft.coords.length === 2 &&
+            draft.coords.every((value) => Number.isFinite(Number(value)))
+            ? draft.coords.map(Number)
+            : [...BARANGAYS[report.barangay].coords];
+        report.photoBlob = draft.photoBlob instanceof Blob ? draft.photoBlob : null;
+        report.photoName = String(draft.photoName || "");
+        report.photo = report.photoBlob ? URL.createObjectURL(report.photoBlob) : null;
+        report.step = Math.max(1, Math.min(3, Number(draft.step) || 1));
+
+        $("#landmark").value = report.landmark;
+        $("#households").value = clampHouseholds(draft.households);
+        $("#notes").value = report.notes;
+        $("#outage-started-at").value = report.startedAt;
+        $("#report-pin-status").textContent = report.pinSelected
+            ? `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`
+            : "No exact pin selected; the area center will be used.";
+        if (report.photoBlob) {
+            $("#report-photo-name").textContent = report.photoName || "Saved photo attached";
+            const preview = new Image();
+            preview.src = report.photo;
+            preview.alt = "Saved outage photo";
+            $("#report-photo-preview").replaceChildren(preview);
+        }
+
+        markDefaultBarangay();
+        $$(".chip-row").forEach((row) => {
+            $$(".chip", row).forEach((chip) =>
+                chip.classList.toggle("active", chip.textContent.trim() === report[row.dataset.group])
+            );
+        });
+        setStep(report.step, true);
+        reportDraftTouched = true;
+        $("#report-draft-status").textContent = "Restored your saved draft from this device. It has not been submitted.";
+    } catch (error) {
+        console.error("Could not restore outage report draft:", error.message);
+        $("#report-draft-status").textContent = `Could not restore the saved draft: ${error.message}`;
+    }
+}
+
+$("#report-panel").addEventListener("input", scheduleReportDraftSave);
+$("#report-panel").addEventListener("change", scheduleReportDraftSave);
+$("#report-panel").addEventListener("click", (event) => {
+    if (event.target.closest("#report-next")) {
+        if (report.step < 3) scheduleReportDraftSave();
+        return;
+    }
+    if (event.target.closest("#sync-pending-reports, [data-remove-report]")) return;
+    if (event.target.closest("button")) scheduleReportDraftSave();
+});
+
+async function renderPendingReports() {
+    const records = await readAllOfflineReports();
+    const pending = records
+        .filter((record) => record.kind === "pending" && record.owner === reportOwner)
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    const panel = $("#pending-reports");
+    panel.hidden = pending.length === 0;
+    $("#pending-reports-title").textContent = `Reports waiting to sync (${pending.length})`;
+    $("#sync-pending-reports").disabled = !navigator.onLine || syncingPendingReports || pending.length === 0;
+    $("#pending-report-list").innerHTML = pending.map((record) => `
+        <article class="pending-report-item">
+            <div>
+                <strong>${esc(record.body.barangay)} · ${esc(record.body.landmark)}</strong>
+                <p>${record.lastError ? `Last attempt failed: ${esc(record.lastError)}` : `Saved ${esc(new Date(record.createdAt).toLocaleString())}`}</p>
+            </div>
+            <button class="ghost-button" type="button" data-remove-report="${esc(record.id)}">Remove</button>
+        </article>
+    `).join("");
+}
+
+async function queueReportForLater(body, photoBlob) {
+    clearTimeout(reportDraftTimer);
+    const record = {
+        id: `pending:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        kind: "pending",
+        owner: reportOwner,
+        body,
+        photoBlob: photoBlob || null,
+        createdAt: new Date().toISOString(),
+        lastError: ""
+    };
+    await enqueueOfflineReport(record, reportDraftId);
+    reportDraftTouched = false;
+    resetReport();
+    $("#report-draft-status").textContent = "Report saved on this device. It will sync when you reconnect.";
+    await renderPendingReports();
+    toast(`Report for ${body.barangay} saved on this device`, "info");
+}
 
 function renderBarangayOptions() {
     if (!BARANGAYS[report.barangay]) {
+        defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
         report.barangay = defaultBarangay;
         report.coords = [...BARANGAYS[defaultBarangay].coords];
     }
@@ -1162,48 +1692,75 @@ function goToStep(target) {
     setStep(target);
 }
 
-function submitReport() {
+async function submitReport() {
+    if (submittingReport) return;
     if (report.photoLoading) {
         toast("Wait for the selected photo to finish processing", "info");
         return;
     }
-    const normalizedAddress = report.landmark.trim().toLowerCase().replace(/\s+/g, " ");
-    const duplicate = outages.find((o) => {
-        if (o.barangay !== report.barangay || o.status === "restored") return false;
-        const sameAddress = o.address.trim().toLowerCase().replace(/\s+/g, " ") === normalizedAddress;
-        const distance = report.pinSelected && map ? map.distance(o.coords, report.coords) : Infinity;
-        return sameAddress || distance <= 150;
-    });
-
-    if (duplicate) {
-        duplicate.households += clampHouseholds($("#households").value);
-        duplicate.reportCount = (duplicate.reportCount || 1) + 1;
-        duplicate.notes = [duplicate.notes, report.notes.trim()].filter(Boolean).join(" · ");
-        if (report.photo) duplicate.photo = report.photo;
-        duplicate.eta = estimateRestoration(duplicate);
-        toast(`Added to outage #${duplicate.id}; ${duplicate.reportCount} similar reports grouped`, "success");
-        resetReport();
-        renderAll();
-        showOnMap(duplicate.id);
-        return;
+    const photoBlob = report.photoBlob;
+    const barangay = report.barangay;
+    const body = {
+        barangay: report.barangay,
+        landmark: report.landmark.trim(),
+        cause: report.cause,
+        latitude: report.coords[0],
+        longitude: report.coords[1],
+        households: clampHouseholds($("#households").value),
+        notes: report.notes.trim()
+    };
+    if (report.startedAt) {
+        const startedAt = new Date(report.startedAt);
+        if (Number.isNaN(startedAt.getTime())) {
+            toast("Choose a valid outage start time.", "danger");
+            return;
+        }
+        body.started_at = startedAt.toISOString();
     }
 
-    const outage = addOutage({
-        barangay: report.barangay,
-        address: report.landmark.trim(),
-        households: clampHouseholds($("#households").value),
-        cause: report.cause,
-        since: report.when,
-        startedAt: report.startedAt || null,
-        coords: [...report.coords],
-        notes: report.notes.trim(),
-        photo: report.photo,
-        reporter: user.name
-    });
-    toast(`Report #${outage.id} saved for ${outage.barangay}`, "success");
-    resetReport();
-    renderAll();
-    showOnMap(outage.id);
+    submittingReport = true;
+    $("#report-next").disabled = true;
+    try {
+        if (!navigator.onLine) {
+            await queueReportForLater(body, photoBlob);
+            return;
+        }
+
+        const requestBody = photoBlob ? new FormData() : body;
+        if (photoBlob) {
+            Object.entries(body).forEach(([key, value]) => requestBody.append(key, String(value)));
+            requestBody.append("photo", photoBlob, "outage-report.jpg");
+        }
+        const response = await Auth.request("/api/incidents/reports", { method: "POST", body: requestBody });
+        if (response.status === 0) {
+            await queueReportForLater(body, photoBlob);
+            return;
+        }
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            const fieldErrors = response.data.errors ? Object.values(response.data.errors).join(" ") : "";
+            throw new Error(fieldErrors || response.data.error || "Could not submit outage report.");
+        }
+        const incidentId = Number(response.data.incident_id);
+        clearTimeout(reportDraftTimer);
+        let draftCleanupWarning = "";
+        try {
+            await deleteOfflineReport(reportDraftId);
+        } catch (error) {
+            console.error("Could not clear the submitted report draft:", error.message);
+            draftCleanupWarning = " The local draft could not be cleared.";
+        }
+        reportDraftTouched = false;
+        resetReport();
+        $("#report-draft-status").textContent = `Your report was submitted.${draftCleanupWarning}`;
+        toast(`Report #${incidentId} saved for ${barangay}${photoBlob ? " with photo" : ""}`, "success");
+        if (await loadIncidents(false)) showOnMap(incidentId);
+        else toast("The report was saved, but the outage list could not be refreshed.", "danger");
+    } catch (error) {
+        toast(error.message || "Could not submit outage report.", "danger");
+    } finally {
+        submittingReport = false;
+        $("#report-next").disabled = false;
+    }
 }
 
 function markDefaultBarangay() {
@@ -1213,6 +1770,7 @@ function markDefaultBarangay() {
 function resetReport() {
     pinSelectionActive = false;
     if (map) map.getContainer().style.cursor = "";
+    if (report.photo) URL.revokeObjectURL(report.photo);
     $("#pin-return-report").hidden = true;
     Object.assign(report, {
         barangay: defaultBarangay,
@@ -1225,6 +1783,8 @@ function resetReport() {
         pinSelected: false,
         startedAt: "",
         photo: null,
+        photoBlob: null,
+        photoName: "",
         photoLoading: false
     });
     $("#landmark").value = "";
@@ -1264,6 +1824,8 @@ $("#report-barangay-options").addEventListener("click", (e) => {
 });
 
 $("#landmark").addEventListener("input", (e) => {
+    locationLookupRequestId += 1;
+    autoDetectedLandmark = "";
     report.landmark = e.target.value;
 });
 $("#landmark").addEventListener("keydown", (e) => {
@@ -1326,12 +1888,23 @@ $("#report-photo").addEventListener("change", (e) => {
                 return;
             }
             context.drawImage(image, 0, 0, canvas.width, canvas.height);
-            report.photo = canvas.toDataURL("image/jpeg", 0.65);
-            const preview = new Image();
-            preview.src = report.photo;
-            preview.alt = "Selected outage photo";
-            $("#report-photo-preview").replaceChildren(preview);
-            report.photoLoading = false;
+            canvas.toBlob((blob) => {
+                if (!blob) {
+                    report.photoLoading = false;
+                    toast("Could not process this photo", "danger");
+                    return;
+                }
+                if (report.photo) URL.revokeObjectURL(report.photo);
+                report.photoBlob = blob;
+                report.photoName = file.name;
+                report.photo = URL.createObjectURL(blob);
+                const preview = new Image();
+                preview.src = report.photo;
+                preview.alt = "Selected outage photo";
+                $("#report-photo-preview").replaceChildren(preview);
+                report.photoLoading = false;
+                scheduleReportDraftSave();
+            }, "image/jpeg", 0.65);
         });
         image.addEventListener("error", () => {
             report.photoLoading = false;
@@ -1380,6 +1953,7 @@ $("#report-next").addEventListener("click", () => {
 function renderFeedback() {
     const list = $("#feedback-list");
     if (!list) return;
+    $("#feedback-clear").hidden = !isStaff;
     if (!feedback.length) {
         list.innerHTML = '<p class="feedback-empty">No whereabouts reports yet.</p>';
         return;
@@ -1389,17 +1963,29 @@ function renderFeedback() {
         <article class="feedback-item">
             <div class="feedback-item-header">
                 <strong>${esc(item.barangay)} · ${esc(item.location)}</strong>
-                <time>${esc(item.time)}</time>
+                <time>${esc(item.pending ? "Pending sync" : new Date(item.created_at || item.time).toLocaleString())}</time>
             </div>
             <p>${esc(item.comment)}</p>
         </article>
     `).join("");
 }
 
-renderBarangayOptions();
-$("#feedback-barangay").value = defaultBarangay;
+async function loadFeedback(showError = true) {
+    try {
+        const response = await Auth.request("/api/feedback");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.feedback)) {
+            throw new Error(response.data.error || "Could not load community feedback.");
+        }
+        feedback = response.data.feedback.concat(pendingFeedback.map((item) => ({ ...item, pending: true })));
+        renderFeedback();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load community feedback.", "danger");
+        return false;
+    }
+}
 
-$("#feedback-form").addEventListener("submit", (e) => {
+$("#feedback-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const barangay = $("#feedback-barangay").value;
     const location = $("#feedback-location").value.trim();
@@ -1412,36 +1998,48 @@ $("#feedback-form").addEventListener("submit", (e) => {
         return;
     }
 
-    feedback.unshift({
-        barangay,
-        location,
-        comment,
-        time: new Date().toLocaleString(),
-        author: user.name
-    });
-    pendingFeedback.unshift(feedback[0]);
-    try {
-        localStorage.setItem(FEEDBACK_KEY, JSON.stringify(feedback));
-        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
-    } catch {
-        toast("Feedback could not be saved in this browser", "danger");
-        return;
+    const body = { barangay, location, comment };
+    if (!navigator.onLine) {
+        pendingFeedback.unshift({ ...body, time: new Date().toLocaleString() });
+        feedback.unshift({ ...pendingFeedback[0], pending: true });
+        toast(`Feedback queued offline for ${barangay}`, "info");
+    } else {
+        const response = await Auth.request("/api/feedback", { method: "POST", body });
+        if (response.status === 0) {
+            pendingFeedback.unshift({ ...body, time: new Date().toLocaleString() });
+            feedback.unshift({ ...pendingFeedback[0], pending: true });
+            toast(`Feedback queued offline for ${barangay}`, "info");
+        } else if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not post feedback.", "danger");
+            return;
+        } else {
+            await loadFeedback(false);
+            toast(`Feedback saved for ${barangay}`, "success");
+        }
     }
 
+    try {
+        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    } catch {
+        toast("Feedback is visible now but could not be saved for offline sync.", "danger");
+        return;
+    }
     $("#feedback-location").value = "";
     $("#feedback-comment").value = "";
     renderFeedback();
     updateSmsLink();
-    toast(navigator.onLine ? `Feedback saved for ${barangay}` : `Feedback saved offline for ${barangay}`, navigator.onLine ? "success" : "info");
 });
 
-$("#feedback-clear").addEventListener("click", () => {
-    if (!feedback.length) return;
-    feedback = [];
+$("#feedback-clear").addEventListener("click", async () => {
+    if (!isStaff || !confirm("Clear all shared community feedback?")) return;
+    const response = await Auth.request("/api/feedback", { method: "DELETE" });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not clear community feedback.", "danger");
+        return;
+    }
     pendingFeedback = [];
-    localStorage.removeItem(FEEDBACK_KEY);
     localStorage.removeItem(FEEDBACK_PENDING_KEY);
-    renderFeedback();
+    await loadFeedback(false);
     toast("All community feedback cleared", "info");
 });
 
@@ -1460,6 +2058,7 @@ updateSmsLink();
 
 /* ---------- network simulation ---------- */
 function renderNetwork() {
+    if (!isStaff) return;
     $$(".feeder").forEach((el, i) => {
         const f = feeders[i];
         el.classList.toggle("offline", !f.online);
@@ -1490,6 +2089,7 @@ function renderNetwork() {
 }
 
 function toggleFeeder(i) {
+    if (!isStaff) return;
     const feeder = feeders[i];
     feeder.online = !feeder.online;
     const affected = Object.keys(BARANGAYS).filter((name) => BARANGAYS[name].feeder === i);
@@ -1529,28 +2129,29 @@ function toggleFeeder(i) {
     renderAll();
 }
 
-$$(".cut-button").forEach((button, i) => button.addEventListener("click", () => toggleFeeder(i)));
+if (isStaff) {
+    $$(".cut-button").forEach((button, i) => button.addEventListener("click", () => toggleFeeder(i)));
 
-$(".network-barangays").addEventListener("click", (e) => {
-    const button = e.target.closest(".net-brgy");
-    if (!button) return;
-    const name = button.dataset.barangay;
-    const active = outages.find((o) => o.barangay === name && o.status !== "restored");
-    if (active) showOnMap(active.id);
-    else toast(`${name} has power and no active outages`, "success");
-});
-
-$$(".proto").forEach((chip) => chip.addEventListener("click", () => toast(chip.dataset.info, "info")));
-
-// Simulated heartbeat: online feeders report new latency every 2 seconds
-setInterval(() => {
-    feeders.forEach((f) => {
-        if (!f.online) return;
-        f.latency = 12 + Math.floor(Math.random() * 30);
-        f.loss = Math.random() < 0.12 ? 1 : 0;
+    $(".network-barangays").addEventListener("click", (e) => {
+        const button = e.target.closest(".net-brgy");
+        if (!button) return;
+        const name = button.dataset.barangay;
+        const active = outages.find((o) => o.barangay === name && o.status !== "restored");
+        if (active) showOnMap(active.id);
+        else toast(`${name} has power and no active outages`, "success");
     });
-    renderNetwork();
-}, 2000);
+
+    $$(".proto").forEach((chip) => chip.addEventListener("click", () => toast(chip.dataset.info, "info")));
+
+    setInterval(() => {
+        feeders.forEach((f) => {
+            if (!f.online) return;
+            f.latency = 12 + Math.floor(Math.random() * 30);
+            f.loss = Math.random() < 0.12 ? 1 : 0;
+        });
+        renderNetwork();
+    }, 2000);
+}
 
 /* ---------- render everything ---------- */
 function renderAll() {
@@ -1563,11 +2164,6 @@ function renderAll() {
     renderNetwork();
     renderForecast();
     renderHistory();
-    try {
-        localStorage.setItem("powergrid_live_state", JSON.stringify({ outages, feeders, selectedId }));
-    } catch {
-        // The interface can still run when browser storage is unavailable.
-    }
 }
 
 /* ---------- start ---------- */
@@ -1580,41 +2176,130 @@ if ("serviceWorker" in navigator) {
 function updateConnectivity() {
     const banner = $("#offline-banner");
     if (banner) banner.hidden = navigator.onLine;
-    if (navigator.onLine) syncPendingFeedback();
+    if (navigator.onLine) {
+        syncPendingFeedback();
+        syncPendingReports();
+    } else {
+        renderPendingReports().catch((error) => {
+            $("#report-draft-status").textContent = `Could not read saved reports: ${error.message}`;
+        });
+    }
 }
 
 async function syncPendingFeedback() {
     if (!pendingFeedback.length) return;
+    const previousLength = pendingFeedback.length;
     const unsent = [];
-    for (const item of pendingFeedback) {
-        try {
-            const response = await fetch("./api/feedback", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(item)
-            });
-            if (!response.ok) unsent.push(item);
-        } catch {
-            unsent.push(item);
+    for (const [index, item] of pendingFeedback.entries()) {
+        const response = await Auth.request("/api/feedback", { method: "POST", body: item });
+        if (response.status >= 200 && response.status < 300 && response.data.ok) continue;
+        if (response.status !== 0) {
+            console.error("Could not sync offline feedback:", response.data.error || `HTTP ${response.status}`);
+        } else {
+            unsent.push(...pendingFeedback.slice(index));
+            break;
         }
+        unsent.push(item);
     }
     pendingFeedback = unsent;
-    localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    try {
+        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    } catch (error) {
+        console.error("Could not persist pending feedback:", error.message);
+    }
+    if (unsent.length < previousLength) {
+        await loadFeedback(false);
+    }
 }
+
+async function syncPendingReports() {
+    if (syncingPendingReports || !navigator.onLine) return;
+    syncingPendingReports = true;
+    let synced = 0;
+    try {
+        const pending = (await readAllOfflineReports())
+            .filter((record) => record.kind === "pending" && record.owner === reportOwner)
+            .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+
+        for (const record of pending) {
+            const body = record.photoBlob ? new FormData() : record.body;
+            if (record.photoBlob) {
+                Object.entries(record.body).forEach(([key, value]) => body.append(key, String(value)));
+                body.append("photo", record.photoBlob, "outage-report.jpg");
+            }
+            const response = await Auth.request("/api/incidents/reports", { method: "POST", body });
+            if (response.status === 0) break;
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                record.lastError = response.data.error || `HTTP ${response.status}`;
+                record.lastAttemptAt = new Date().toISOString();
+                await writeOfflineReport(record);
+                continue;
+            }
+            await deleteOfflineReport(record.id);
+            synced++;
+        }
+
+        if (synced) {
+            $("#report-draft-status").textContent = `${synced} saved outage ${synced === 1 ? "report was" : "reports were"} synced.`;
+            toast(`${synced} saved outage ${synced === 1 ? "report" : "reports"} synced`, "success");
+            await loadIncidents(false);
+        }
+    } catch (error) {
+        console.error("Could not sync offline outage reports:", error.message);
+        $("#report-draft-status").textContent = `Could not sync saved reports: ${error.message}`;
+    } finally {
+        syncingPendingReports = false;
+        try {
+            await renderPendingReports();
+        } catch (error) {
+            console.error("Could not refresh the offline report queue:", error.message);
+        }
+    }
+}
+
+$("#sync-pending-reports").addEventListener("click", syncPendingReports);
+$("#pending-report-list").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-remove-report]");
+    if (!button || !confirm("Remove this saved outage report from this device? This cannot be undone.")) return;
+    try {
+        await deleteOfflineReport(button.dataset.removeReport);
+        await renderPendingReports();
+        toast("Saved outage report removed", "info");
+    } catch (error) {
+        console.error("Could not remove saved outage report:", error.message);
+        toast(`Could not remove saved report: ${error.message}`, "danger");
+    }
+});
 
 window.addEventListener("online", updateConnectivity);
 window.addEventListener("offline", updateConnectivity);
 
-renderAreaAdmin();
-renderUserAdmin();
+if (isStaff) {
+    renderAreaAdmin();
+    renderUserAdmin();
+}
 initMap();
-log("Simulated nodes connected over HTTPS and WebSocket");
+if (isStaff) log("Browser network simulation ready; MQTT sensor adapter is disabled by default");
 renderAll();
 renderFeedback();
 markDefaultBarangay();
 setStep(1, true);
 syncSliders();
+restoreReportDraft();
+renderPendingReports().catch((error) => {
+    console.error("Could not load offline outage reports:", error.message);
+    $("#report-draft-status").textContent = `Could not load saved reports: ${error.message}`;
+});
 updateConnectivity();
+loadIncidents();
+loadBarangays();
+loadAnnouncements();
+loadFeedback();
+if (isStaff) loadUsers();
+window.addEventListener("focus", () => loadIncidents(false));
+setInterval(() => {
+    if (document.visibilityState === "visible") loadIncidents(false);
+}, 30000);
 
 setTimeout(() => {
     $$(".risk").forEach((card) => {
@@ -1635,11 +2320,111 @@ document.addEventListener("pointerdown", (e) => {
     setTimeout(() => ripple.remove(), 900);
 });
 
+/* ---------- profile editor ---------- */
+function updateProfilePreview(photoUrl) {
+    const initial = $("#profile-photo-initial");
+    const image = $("#profile-photo-image");
+    initial.textContent = $("#profile-name").value.trim().charAt(0).toUpperCase() || "?";
+    image.hidden = !photoUrl;
+    initial.hidden = Boolean(photoUrl);
+    if (photoUrl) image.src = photoUrl;
+    else image.removeAttribute("src");
+}
+
+function resetProfilePhotoPreview() {
+    if (profilePreviewObjectUrl) {
+        URL.revokeObjectURL(profilePreviewObjectUrl);
+        profilePreviewObjectUrl = null;
+    }
+    $("#profile-photo").value = "";
+    updateProfilePreview(profileAvatarObjectUrl);
+}
+
+function openProfileDialog() {
+    $("#profile-name").value = user.name;
+    $("#profile-email").textContent = `Sign-in email: ${user.email}`;
+    $("#profile-message").textContent = "";
+    $("#profile-message").classList.remove("error");
+    resetProfilePhotoPreview();
+    $("#profile-dialog").hidden = false;
+    $("#profile-name").focus();
+}
+
+function closeProfileDialog() {
+    $("#profile-dialog").hidden = true;
+    resetProfilePhotoPreview();
+    $("#profile-open").focus();
+}
+
+$("#profile-open").addEventListener("click", openProfileDialog);
+$$("[data-profile-close]").forEach((button) => {
+    button.addEventListener("click", closeProfileDialog);
+});
+
+$("#profile-photo").addEventListener("change", (event) => {
+    const file = event.target.files[0];
+    if (!file) {
+        resetProfilePhotoPreview();
+        return;
+    }
+    if (!["image/jpeg", "image/png"].includes(file.type) || file.size > 2 * 1024 * 1024) {
+        resetProfilePhotoPreview();
+        $("#profile-message").textContent = "Choose a JPG or PNG image that is 2 MB or smaller.";
+        $("#profile-message").classList.add("error");
+        return;
+    }
+    if (profilePreviewObjectUrl) URL.revokeObjectURL(profilePreviewObjectUrl);
+    profilePreviewObjectUrl = URL.createObjectURL(file);
+    updateProfilePreview(profilePreviewObjectUrl);
+    $("#profile-message").textContent = "";
+    $("#profile-message").classList.remove("error");
+});
+
+$("#profile-name").addEventListener("input", () => {
+    if (!profilePreviewObjectUrl) updateProfilePreview(profileAvatarObjectUrl);
+});
+
+$("#profile-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const saveButton = $("#profile-save");
+    const message = $("#profile-message");
+    const formData = new FormData();
+    formData.set("name", $("#profile-name").value.trim());
+    const photo = $("#profile-photo").files[0];
+    if (photo) formData.set("photo", photo);
+
+    saveButton.disabled = true;
+    message.textContent = "Saving your profile…";
+    message.classList.remove("error");
+    try {
+        const { status, data } = await Auth.request("/api/auth/me", {
+            method: "PATCH",
+            body: formData
+        });
+        if (status === 0) throw new Error("Could not reach the server. Check your connection and try again.");
+        if (!data.ok || !data.user) throw new Error(data.error || "Could not update your profile.");
+
+        Object.assign(user, data.user);
+        Auth.updateCurrentUser(user);
+        $("#user-name").textContent = user.name;
+        $("#user-name").title = user.email;
+        $("#user-role").textContent = isStaff ? "Staff" : `Resident · ${user.barangay}`;
+        renderProfileAvatar();
+        closeProfileDialog();
+        toast("Profile updated", "success");
+    } catch (error) {
+        message.textContent = error.message || "Could not update your profile.";
+        message.classList.add("error");
+    } finally {
+        saveButton.disabled = false;
+    }
+});
+
 /* ---------- log out + welcome ---------- */
 $("#logout-button").addEventListener("click", () => {
     document.body.classList.add("signing-out");
     Auth.logout();
-    setTimeout(() => location.replace("Login.html"), 380);
+    setTimeout(() => location.replace(isStaff ? "StaffLogin.html" : "Login.html"), 380);
 });
 
 if (sessionStorage.getItem("pg_welcome")) {

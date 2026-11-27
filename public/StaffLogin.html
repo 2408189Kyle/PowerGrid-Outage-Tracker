@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f6f8">
+    <link rel="manifest" href="manifest.json">
+    <title>Staff sign in · PowerGrid Outage Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Fira+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="Auth.css">
+</head>
+<body class="auth-page">
+    <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+
+    <main class="auth-shell">
+        <section class="auth-card" id="auth-card">
+            <header class="auth-brand">
+                <div class="brand" aria-hidden="true">⚡</div>
+                <div>
+                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · STAFF PORTAL</p>
+                    <h1>Staff sign in</h1>
+                </div>
+            </header>
+            <p class="auth-sub">Staff access is granted by an administrator. New staff should create a resident account first, then ask an administrator to promote it.</p>
+
+            <form id="login-form" novalidate>
+                <div class="field">
+                    <label for="login-email">Staff email</label>
+                    <input id="login-email" name="email" type="email" autocomplete="username" placeholder="staff@example.com" required>
+                    <small class="field-error"></small>
+                </div>
+                <div class="field">
+                    <label for="login-password">Password</label>
+                    <div class="pw-wrap">
+                        <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Your password" required>
+                        <button class="pw-toggle" type="button" data-toggle="login-password" aria-label="Show password">Show</button>
+                    </div>
+                    <small class="field-error"></small>
+                </div>
+                <label class="check"><input id="login-remember" type="checkbox"> <span>Keep me logged in for 7 days</span></label>
+                <p class="form-error" id="login-error" role="alert"></p>
+                <button class="primary-button auth-submit" type="submit">Sign in to staff portal</button>
+            </form>
+
+            <p class="auth-footer"><a href="Login.html#register">Create an account or return to resident sign in</a></p>
+        </section>
+    </main>
+
+    <script src="Auth.js"></script>
+    <script src="StaffLogin.js"></script>
+</body>
+</html>
