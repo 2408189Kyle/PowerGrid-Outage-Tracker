@@ -1,7 +1,6 @@
 "use strict";
 
 /* =========================================================
-   PowerGrid Outage Tracker
    One shared list of outages drives the map, the stats,
    the admin board and the network simulation.
    ========================================================= */
@@ -167,10 +166,8 @@ try {
         selectedId = outages.some((o) => o.id === saved.selectedId) ? saved.selectedId : outages[0]?.id || 0;
     }
 } catch {
-    // Keep the sample state if saved browser data is invalid.
 }
 
-/* ---------- small UI helpers ---------- */
 function toast(message, type = "info") {
     const wrap = $("#toasts");
     const icons = { info: "✦", success: "✓", danger: "!" };
@@ -465,7 +462,6 @@ function selectOutage(id, options = {}) {
     else if (options.pan) map.panTo(outage.coords, { animate: true });
 }
 
-// Open the map page, make sure the outage isn't hidden by a filter, and fly to it
 function showOnMap(id) {
     filter = "all";
     const wait = showPage("map");
@@ -754,7 +750,6 @@ function cardHTML(o) {
         </article>`;
 }
 
-// Cards slide to their new spot (FLIP); a card that changed column blurs in
 function renderAdmin() {
     const animate = $("#admin-page").classList.contains("view-active");
     const before = new Map();
@@ -1130,7 +1125,6 @@ function validateStepOne() {
 
 let stepToken = 0;
 
-// Old step fades out in the direction you're leaving, new one fades in from the other side
 function setStep(n, instant = false) {
     const previous = report.step;
     report.step = n;
@@ -1622,14 +1616,12 @@ setStep(1, true);
 syncSliders();
 updateConnectivity();
 
-// Let the forecast bars grow after first paint
 setTimeout(() => {
     $$(".risk").forEach((card) => {
         $(".bar b", card).style.width = `${card.dataset.risk}%`;
     });
 }, 250);
 
-// Soft ripple where you press a button
 document.addEventListener("pointerdown", (e) => {
     const button = e.target.closest("button");
     if (!button || button.disabled) return;
