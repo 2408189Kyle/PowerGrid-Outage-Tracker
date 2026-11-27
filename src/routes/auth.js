@@ -3,12 +3,27 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const multer = require("multer");
 const { z } = require("zod");
 const { query } = require("../config/db");
 const requireAuth = require("../middleware/auth");
+const { getPhoto, isValidImageSignature, removePhoto, storePhoto } = require("../services/photo-storage");
 
 const router = express.Router();
 const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
+const maxProfilePhotoSize = 2 * 1024 * 1024;
+const profilePhotoUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: maxProfilePhotoSize, files: 1 },
+    fileFilter: (_req, file, callback) => {
+        if (!["image/jpeg", "image/png"].includes(file.mimetype)) {
+            const error = new Error("Upload a JPG or PNG profile picture.");
+            error.statusCode = 400;
+            return callback(error);
+        }
+        return callback(null, true);
+    }
+});
 
 const registerSchema = z.object({
     name: z.string().trim().min(2, "Enter your full name.").max(100, "Name is too long."),
@@ -41,6 +56,10 @@ const loginSchema = z.object({
     remember: z.boolean().optional()
 });
 
+const profileSchema = z.object({
+    name: z.string().trim().min(2, "Name must be at least 2 characters.").max(100, "Name is too long.")
+});
+
 function fieldErrors(issues) {
     return issues.reduce((errors, issue) => {
         const field = issue.path[0];
@@ -56,8 +75,35 @@ function publicUser(user, barangay = null) {
         email: user.email,
         role: user.role,
         barangay_id: user.barangay_id,
-        barangay
+        barangay,
+        profile_photo_url: user.profile_photo_path ? "/api/auth/me/photo" : null
     };
+}
+
+function parseProfilePhoto(req, res, next) {
+    profilePhotoUpload.single("photo")(req, res, (error) => {
+        if (!error) return next();
+        if (error instanceof multer.MulterError) {
+            const tooLarge = error.code === "LIMIT_FILE_SIZE";
+            return res.status(tooLarge ? 413 : 400).json({
+                ok: false,
+                error: tooLarge ? "Profile picture must be 2 MB or smaller." : "Invalid profile picture upload."
+            });
+        }
+        if (error.statusCode === 400) {
+            return res.status(400).json({ ok: false, error: error.message });
+        }
+        return next(error);
+    });
+}
+
+async function removeProfilePhoto(storedPath) {
+    if (!storedPath) return;
+    try {
+        await removePhoto(storedPath);
+    } catch (error) {
+        console.error("Could not remove profile picture:", error.message);
+    }
 }
 
 function createToken(user, remember) {
@@ -127,6 +173,7 @@ router.post("/login", async (req, res, next) => {
     try {
         const result = await query(
             `SELECT u.id, u.name, u.email, u.role, u.barangay_id, u.password_hash,
+                    u.profile_photo_path,
                     b.name AS barangay
              FROM users u
              LEFT JOIN barangays b ON b.id = u.barangay_id
@@ -164,7 +211,8 @@ router.post("/login", async (req, res, next) => {
 router.get("/me", requireAuth, async (req, res, next) => {
     try {
         const result = await query(
-            `SELECT u.id, u.name, u.email, u.role, u.barangay_id, b.name AS barangay
+            `SELECT u.id, u.name, u.email, u.role, u.barangay_id,
+                    u.profile_photo_path, b.name AS barangay
              FROM users u
              LEFT JOIN barangays b ON b.id = u.barangay_id
              WHERE u.id = $1 AND u.is_active = true`,
@@ -175,6 +223,87 @@ router.get("/me", requireAuth, async (req, res, next) => {
         }
         return res.json({ ok: true, user: publicUser(result.rows[0], result.rows[0].barangay) });
     } catch (error) {
+        return next(error);
+    }
+});
+
+router.patch("/me", requireAuth, parseProfilePhoto, async (req, res, next) => {
+    const parsed = profileSchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({
+            ok: false,
+            error: parsed.error.issues[0].message
+        });
+    }
+    if (req.file && !isValidImageSignature(req.file.buffer, req.file.mimetype)) {
+        return res.status(400).json({
+            ok: false,
+            error: "The uploaded file is not a valid JPG or PNG image."
+        });
+    }
+
+    let storedPhotoPath = null;
+    try {
+        const current = await query(
+            `SELECT u.profile_photo_path, b.name AS barangay
+             FROM users u
+             LEFT JOIN barangays b ON b.id = u.barangay_id
+             WHERE u.id = $1 AND u.is_active = true`,
+            [req.user.sub]
+        );
+        if (!current.rows[0]) {
+            return res.status(401).json({ ok: false, error: "Account is unavailable." });
+        }
+
+        if (req.file) storedPhotoPath = await storePhoto(req.file.buffer, req.file.mimetype);
+        const result = await query(
+            `UPDATE users
+             SET name = $2, profile_photo_path = COALESCE($3, profile_photo_path)
+             WHERE id = $1 AND is_active = true
+             RETURNING id, name, email, role, barangay_id, profile_photo_path`,
+            [req.user.sub, parsed.data.name, storedPhotoPath]
+        );
+        if (!result.rows[0]) {
+            await removeProfilePhoto(storedPhotoPath);
+            storedPhotoPath = null;
+            return res.status(401).json({ ok: false, error: "Account is unavailable." });
+        }
+
+        const previousPhotoPath = current.rows[0].profile_photo_path;
+        const updatedUser = result.rows[0];
+        if (storedPhotoPath) {
+            storedPhotoPath = null;
+            if (previousPhotoPath) await removeProfilePhoto(previousPhotoPath);
+        }
+        return res.json({
+            ok: true,
+            user: publicUser(updatedUser, current.rows[0].barangay)
+        });
+    } catch (error) {
+        await removeProfilePhoto(storedPhotoPath);
+        return next(error);
+    }
+});
+
+router.get("/me/photo", requireAuth, async (req, res, next) => {
+    try {
+        const result = await query(
+            "SELECT profile_photo_path FROM users WHERE id = $1 AND is_active = true",
+            [req.user.sub]
+        );
+        const storedPath = result.rows[0] && result.rows[0].profile_photo_path;
+        if (!storedPath) return res.status(404).json({ ok: false, error: "Profile picture not found." });
+
+        const photo = await getPhoto(storedPath);
+        res.setHeader("Cache-Control", "private, no-store");
+        res.setHeader("Content-Type", photo.contentType);
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        photo.body.on("error", next);
+        return photo.body.pipe(res);
+    } catch (error) {
+        if (error.code === "ENOENT" || error.name === "NoSuchKey" || error.name === "NotFound") {
+            return res.status(404).json({ ok: false, error: "Profile picture file not found." });
+        }
         return next(error);
     }
 });

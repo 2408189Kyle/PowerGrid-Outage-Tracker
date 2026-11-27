@@ -6,7 +6,7 @@ const multer = require("multer");
 const { pool, query } = require("../config/db");
 const requireAuth = require("../middleware/auth");
 const requireAdmin = require("../middleware/admin");
-const { getPhoto, removePhoto, storePhoto } = require("../services/photo-storage");
+const { getPhoto, isValidImageSignature, removePhoto, storePhoto } = require("../services/photo-storage");
 
 const router = express.Router();
 const maxPhotoSize = 8 * 1024 * 1024;
@@ -39,15 +39,6 @@ function parseReportPhoto(req, res, next) {
         }
         return next(error);
     });
-}
-
-function validImageSignature(buffer, mimetype) {
-    if (mimetype === "image/jpeg") {
-        return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
-    }
-    return mimetype === "image/png" &&
-        buffer.length >= 8 &&
-        buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 }
 
 const numberInput = (schema) => z.preprocess(
@@ -169,7 +160,7 @@ router.post("/reports", requireAuth, parseReportPhoto, async (req, res, next) =>
         return res.status(400).json({ ok: false, errors });
     }
 
-    if (req.file && !validImageSignature(req.file.buffer, req.file.mimetype)) {
+    if (req.file && !isValidImageSignature(req.file.buffer, req.file.mimetype)) {
         return res.status(400).json({ ok: false, error: "The uploaded file is not a valid JPG or PNG image." });
     }
 

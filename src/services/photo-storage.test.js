@@ -38,7 +38,7 @@ const {
     HeadBucketCommand,
     PutObjectCommand
 } = require("@aws-sdk/client-s3");
-const { getPhoto, removePhoto, storePhoto } = require("./photo-storage");
+const { getPhoto, isValidImageSignature, removePhoto, storePhoto } = require("./photo-storage");
 
 beforeEach(() => {
     mockClients[0].send.mockReset().mockResolvedValue({});
@@ -83,4 +83,14 @@ test("rejects malformed or path-traversing photo keys before storage access", as
     await expect(getPhoto("../outside.png")).rejects.toThrow("Invalid stored photo key.");
     await expect(removePhoto("minio:../outside.png")).rejects.toThrow("Invalid stored photo key.");
     expect(mockClients[0].send).not.toHaveBeenCalled();
+});
+
+test("validates JPEG and PNG signatures instead of trusting upload MIME types", () => {
+    expect(isValidImageSignature(Buffer.from([0xff, 0xd8, 0xff, 0x00]), "image/jpeg")).toBe(true);
+    expect(isValidImageSignature(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        "image/png"
+    )).toBe(true);
+    expect(isValidImageSignature(Buffer.from("not an image"), "image/jpeg")).toBe(false);
+    expect(isValidImageSignature(Buffer.from([0xff, 0xd8, 0xff]), "image/png")).toBe(false);
 });

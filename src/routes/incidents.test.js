@@ -17,6 +17,14 @@ jest.mock("../middleware/admin", () => (req, res, next) => {
 
 jest.mock("../services/photo-storage", () => ({
     getPhoto: jest.fn(),
+    isValidImageSignature: jest.fn((buffer, mimetype) => {
+        if (mimetype === "image/jpeg") {
+            return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+        }
+        return mimetype === "image/png" &&
+            buffer.length >= 8 &&
+            buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    }),
     removePhoto: jest.fn().mockResolvedValue(),
     storePhoto: jest.fn().mockResolvedValue("minio:0123456789abcdef0123456789abcdef.png")
 }));

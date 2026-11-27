@@ -17,7 +17,7 @@
 <body>
     <div class="offline-banner" id="offline-banner" role="status" hidden>
         <span>Offline mode</span>
-        <small>You are offline. New outage reports require a connection; queued feedback will sync when reconnected.</small>
+        <small>You are offline. Saved outage reports and feedback sync when this app is open and connected.</small>
     </div>
     <!-- Blurred purple glow behind everything -->
     <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -34,20 +34,22 @@
                 <span class="nav-icon">＋</span>
                 <span>Report</span>
             </button>
-            <button class="nav-item" type="button" data-page="network" aria-label="Network" title="Network (press 3)">
-                <span class="nav-icon">⌂</span>
-                <span>Network</span>
-            </button>
-            <button class="nav-item" type="button" data-page="admin" aria-label="Admin" title="Admin (press 4)">
+            <button class="nav-item" type="button" data-page="admin" aria-label="Admin" title="Admin (press 3)">
                 <span class="nav-icon">▦</span>
                 <span>Admin</span>
             </button>
         </nav>
 
         <div class="user-box">
-            <div class="avatar" id="user-avatar" aria-hidden="true">?</div>
-            <p class="user-name" id="user-name">Guest</p>
-            <p class="user-role" id="user-role">Resident</p>
+            <button class="profile-open" id="profile-open" type="button" aria-label="Edit profile" title="Edit profile">
+                <span class="avatar" id="user-avatar" aria-hidden="true">
+                    <span id="user-avatar-initial">?</span>
+                    <img id="user-avatar-image" alt="" hidden>
+                </span>
+                <span class="user-name" id="user-name">Guest</span>
+                <span class="user-role" id="user-role">Resident</span>
+                <span class="profile-edit-hint">Edit profile</span>
+            </button>
             <button class="logout-button" id="logout-button" type="button">Log out</button>
         </div>
     </aside>
@@ -81,7 +83,7 @@
                     <p>Restored</p>
                     <strong id="stat-restored">0</strong>
                 </article>
-                <article>
+                <article class="admin-monitor-stat">
                     <p>Feeder nodes online</p>
                     <strong id="stat-feeders">3 <small>of 3</small></strong>
                 </article>
@@ -185,7 +187,7 @@
                 <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
 
-            <section class="report-panel spot">
+            <section class="report-panel spot" id="report-panel">
                 <div class="report-steps">
                     <button class="step active" type="button" data-go="1">1. Where</button>
                     <button class="step" type="button" data-go="2">2. When</button>
@@ -251,6 +253,19 @@
                     <button class="ghost-button" id="report-back" type="button" hidden>Back</button>
                     <button class="primary-button" id="report-next" type="button">Next step</button>
                 </div>
+                <p id="report-draft-status" class="report-draft-status" role="status" aria-live="polite">
+                    Changes are saved on this device as you fill out the report.
+                </p>
+                <section id="pending-reports" class="pending-reports" aria-labelledby="pending-reports-title" hidden>
+                    <div class="pending-reports-heading">
+                        <div>
+                            <h3 id="pending-reports-title">Reports waiting to sync</h3>
+                            <p>These reports are stored on this device and will sync when this app is open and connected.</p>
+                        </div>
+                        <button class="ghost-button" id="sync-pending-reports" type="button">Sync now</button>
+                    </div>
+                    <div id="pending-report-list" class="pending-report-list"></div>
+                </section>
             </section>
 
             <section class="feedback-panel spot">
@@ -284,82 +299,6 @@
             </section>
         </section>
 
-        <!-- ===================== NETWORK ===================== -->
-        <section class="page" id="network-page">
-            <header class="topbar">
-                <div>
-                    <p class="eyebrow">POWERGRID OUTAGE TRACKER · BATANGAS CITY</p>
-                    <h1>Network Monitor (Simulated)</h1>
-                </div>
-                <div class="live-status"><span></span> LIVE</div>
-            </header>
-
-            <section class="announcement spot">
-                <span class="speaker">⌁</span>
-                <p><strong>Announcement:</strong> No current advisories.</p>
-            </section>
-            <p class="network-intro">Feeder fault controls are simulated in this browser. The MQTT adapter is prepared but disabled until configured with registered sensor nodes; no physical sensors are connected.</p>
-
-            <div class="network-layout">
-                <section class="network-board spot">
-                    <div class="substation">SUBSTATION · ONLINE</div>
-                    <div class="network-connectors"><i></i><i></i><i></i></div>
-                    <div class="feeders">
-                        <article class="feeder spot">
-                            <h3>Feeder 1</h3>
-                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
-                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
-                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
-                        </article>
-                        <article class="feeder spot">
-                            <h3>Feeder 2</h3>
-                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
-                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
-                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
-                        </article>
-                        <article class="feeder spot">
-                            <h3>Feeder 3</h3>
-                            <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
-                            <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
-                            <button class="cut-button" type="button">Cut link (simulate fault)</button>
-                        </article>
-                    </div>
-                    <div class="network-barangays">
-                        <div class="net-col">
-                            <span class="net-label">Powered by Feeder 1</span>
-                            <button class="net-brgy" type="button" data-barangay="Poblacion"><span>Poblacion</span><small>Powered</small></button>
-                            <button class="net-brgy" type="button" data-barangay="Alangilan"><span>Alangilan</span><small>Powered</small></button>
-                        </div>
-                        <div class="net-col">
-                            <span class="net-label">Powered by Feeder 2</span>
-                            <button class="net-brgy" type="button" data-barangay="Pallocan West"><span>Pallocan West</span><small>Powered</small></button>
-                            <button class="net-brgy" type="button" data-barangay="Kumintang Ibaba"><span>Kumintang Ibaba</span><small>Powered</small></button>
-                        </div>
-                        <div class="net-col">
-                            <span class="net-label">Powered by Feeder 3</span>
-                            <button class="net-brgy" type="button" data-barangay="Bolbok"><span>Bolbok</span><small>Powered</small></button>
-                            <button class="net-brgy" type="button" data-barangay="Sta. Rita Karsada"><span>Sta. Rita Karsada</span><small>Powered</small></button>
-                        </div>
-                    </div>
-                </section>
-
-                <aside class="network-side">
-                    <section class="spot">
-                        <h3>Event log</h3>
-                        <ul id="event-log" class="log"></ul>
-                    </section>
-                    <section class="spot">
-                        <h3>Protocols in use</h3>
-                        <div class="protocols">
-                            <button type="button" class="proto" data-info="HTTPS carries reports and admin actions securely to the server.">HTTPS</button>
-                            <button type="button" class="proto" data-info="WebSocket pushes live outage updates to every open map.">WebSocket</button>
-                            <button type="button" class="proto" data-info="MQTT heartbeats can be enabled in local configuration. No hardware connection is active by default.">MQTT adapter (disabled by default)</button>
-                        </div>
-                    </section>
-                </aside>
-            </div>
-        </section>
-
         <!-- ===================== ADMIN ===================== -->
         <section class="page" id="admin-page">
             <header class="topbar">
@@ -375,6 +314,68 @@
                 <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
             <p class="network-intro">Each report moves left to right as staff work on it. Use the bright purple button to move a card forward, or click a card title to find it on the map.</p>
+
+            <section class="admin-network-monitor spot" aria-labelledby="network-monitor-title">
+                <h2 id="network-monitor-title">Network Monitor (Simulated)</h2>
+                <p class="network-intro">Feeder fault controls are simulated in this browser. The MQTT adapter is prepared but disabled until configured with registered sensor nodes; no physical sensors are connected.</p>
+                <div class="network-layout">
+                    <section class="network-board spot">
+                        <div class="substation">SUBSTATION · ONLINE</div>
+                        <div class="network-connectors"><i></i><i></i><i></i></div>
+                        <div class="feeders">
+                            <article class="feeder spot">
+                                <h3>Feeder 1</h3>
+                                <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                                <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                                <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                            </article>
+                            <article class="feeder spot">
+                                <h3>Feeder 2</h3>
+                                <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                                <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                                <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                            </article>
+                            <article class="feeder spot">
+                                <h3>Feeder 3</h3>
+                                <strong class="feeder-state"><i class="dot"></i><span>ONLINE</span></strong>
+                                <p class="feeder-stats">Latency 18 ms · Loss 0%</p>
+                                <button class="cut-button" type="button">Cut link (simulate fault)</button>
+                            </article>
+                        </div>
+                        <div class="network-barangays">
+                            <div class="net-col">
+                                <span class="net-label">Powered by Feeder 1</span>
+                                <button class="net-brgy" type="button" data-barangay="Poblacion"><span>Poblacion</span><small>Powered</small></button>
+                                <button class="net-brgy" type="button" data-barangay="Alangilan"><span>Alangilan</span><small>Powered</small></button>
+                            </div>
+                            <div class="net-col">
+                                <span class="net-label">Powered by Feeder 2</span>
+                                <button class="net-brgy" type="button" data-barangay="Pallocan West"><span>Pallocan West</span><small>Powered</small></button>
+                                <button class="net-brgy" type="button" data-barangay="Kumintang Ibaba"><span>Kumintang Ibaba</span><small>Powered</small></button>
+                            </div>
+                            <div class="net-col">
+                                <span class="net-label">Powered by Feeder 3</span>
+                                <button class="net-brgy" type="button" data-barangay="Bolbok"><span>Bolbok</span><small>Powered</small></button>
+                                <button class="net-brgy" type="button" data-barangay="Sta. Rita Karsada"><span>Sta. Rita Karsada</span><small>Powered</small></button>
+                            </div>
+                        </div>
+                    </section>
+                    <aside class="network-side">
+                        <section class="spot">
+                            <h3>Event log</h3>
+                            <ul id="event-log" class="log"></ul>
+                        </section>
+                        <section class="spot">
+                            <h3>Protocols in use</h3>
+                            <div class="protocols">
+                                <button type="button" class="proto" data-info="HTTPS carries reports and admin actions securely to the server.">HTTPS</button>
+                                <button type="button" class="proto" data-info="WebSocket pushes live outage updates to every open map.">WebSocket</button>
+                                <button type="button" class="proto" data-info="MQTT heartbeats can be enabled in local configuration. No hardware connection is active by default.">MQTT adapter (disabled by default)</button>
+                            </div>
+                        </section>
+                    </aside>
+                </div>
+            </section>
 
             <div class="admin-columns">
                 <section class="admin-column reported" data-status="reported">
@@ -439,6 +440,41 @@
 
     <div class="toast-wrap" id="toasts" aria-live="polite"></div>
     <div class="date-picker" id="date-picker" role="dialog" aria-label="Choose a date" hidden></div>
+    <div class="profile-dialog" id="profile-dialog" hidden>
+        <button class="profile-dialog-backdrop" type="button" data-profile-close aria-label="Close profile editor"></button>
+        <section class="profile-dialog-card" role="dialog" aria-modal="true" aria-labelledby="profile-dialog-title">
+            <header class="profile-dialog-heading">
+                <div>
+                    <p class="eyebrow">YOUR ACCOUNT</p>
+                    <h2 id="profile-dialog-title">Edit profile</h2>
+                </div>
+                <button class="profile-dialog-close" type="button" data-profile-close aria-label="Close profile editor">×</button>
+            </header>
+            <form id="profile-form">
+                <div class="profile-photo-row">
+                    <span class="profile-photo-preview" aria-hidden="true">
+                        <span id="profile-photo-initial">?</span>
+                        <img id="profile-photo-image" alt="" hidden>
+                    </span>
+                    <div class="profile-photo-fields">
+                        <label for="profile-photo">Profile picture</label>
+                        <input class="profile-photo-input" id="profile-photo" name="photo" type="file" accept="image/jpeg,image/png">
+                        <small>JPG or PNG, up to 2 MB. Leave empty to keep your current picture.</small>
+                    </div>
+                </div>
+                <label class="profile-field" for="profile-name">
+                    <span>Full name</span>
+                    <input id="profile-name" name="name" type="text" minlength="2" maxlength="100" autocomplete="name" required>
+                </label>
+                <p class="profile-email" id="profile-email"></p>
+                <p class="profile-message" id="profile-message" role="status" aria-live="polite"></p>
+                <div class="profile-dialog-actions">
+                    <button class="ghost-button" type="button" data-profile-close>Cancel</button>
+                    <button class="primary-button" id="profile-save" type="submit">Save changes</button>
+                </div>
+            </form>
+        </section>
+    </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="script.js"></script>

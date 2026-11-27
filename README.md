@@ -17,6 +17,10 @@ Use the Express server for both the frontend and API; VS Code Live Server does n
    ```powershell
    docker compose exec -T db psql -U postgres -d powergrid -f /docker-entrypoint-initdb.d/005_local_demo_integrations.sql
    ```
+   To enable profile picture uploads on an existing database volume, also apply:
+   ```powershell
+   docker compose exec -T db psql -U postgres -d powergrid -f /docker-entrypoint-initdb.d/006_user_profiles.sql
+   ```
 4. Start the app:
    ```powershell
    npm run dev

@@ -119,6 +119,12 @@ const Auth = (() => {
             return session ? session.user : null;
         },
 
+        updateCurrentUser(user) {
+            const session = readSession();
+            if (!session) throw new Error("Login required to update your profile.");
+            saveSession(user, session.token, Boolean(localStorage.getItem(SESSION_KEY)));
+        },
+
         async guard() {
             const session = readSession();
             if (!session) return location.replace("Login.html");

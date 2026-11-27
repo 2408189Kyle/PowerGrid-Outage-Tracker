@@ -1,4 +1,4 @@
-const CACHE_NAME = "powergrid-v6";
+const CACHE_NAME = "powergrid-v8";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -32,6 +32,7 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const requestUrl = new URL(event.request.url);
   if (requestUrl.origin !== self.location.origin) return;
+  if (requestUrl.pathname.startsWith("/api/")) return;
 
   event.respondWith(
     fetch(event.request)

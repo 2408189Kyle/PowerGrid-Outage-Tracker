@@ -12,7 +12,7 @@ const esc = (text) =>
     String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // If index.html is an older copy, stop with a clear message instead of half-working.
-const REQUIRED_IDS = ["stat-active", "outage-card", "manage-button", "event-log", "toasts", "report-next", "post-announcement", "logout-button", "user-name"];
+const REQUIRED_IDS = ["stat-active", "outage-card", "manage-button", "event-log", "toasts", "report-next", "post-announcement", "logout-button", "user-name", "profile-open", "profile-dialog"];
 const missingIds = REQUIRED_IDS.filter((id) => !document.getElementById(id));
 if (missingIds.length) {
     document.body.insertAdjacentHTML(
@@ -30,11 +30,42 @@ const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 const user = Auth.currentUser();
 if (!user) throw new Error("Not logged in");
 const isStaff = user.role === "admin";
+let profileAvatarObjectUrl = null;
+let profilePreviewObjectUrl = null;
 document.body.classList.toggle("is-staff", isStaff);
-$("#user-avatar").textContent = user.name.trim().charAt(0).toUpperCase();
 $("#user-name").textContent = user.name;
 $("#user-name").title = user.email;
 $("#user-role").textContent = isStaff ? "Staff" : `Resident · ${user.barangay}`;
+
+function renderProfileAvatar() {
+    const initial = $("#user-avatar-initial");
+    const image = $("#user-avatar-image");
+    initial.textContent = user.name.trim().charAt(0).toUpperCase();
+    initial.hidden = false;
+    image.hidden = true;
+    image.removeAttribute("src");
+    if (profileAvatarObjectUrl) {
+        URL.revokeObjectURL(profileAvatarObjectUrl);
+        profileAvatarObjectUrl = null;
+    }
+    if (!user.profile_photo_url) return;
+
+    const photoUrl = user.profile_photo_url;
+    Auth.requestImage(photoUrl).then((objectUrl) => {
+        if (user.profile_photo_url !== photoUrl) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+        }
+        profileAvatarObjectUrl = objectUrl;
+        image.src = objectUrl;
+        image.hidden = false;
+        initial.hidden = true;
+    }).catch((error) => {
+        console.error("Could not load profile picture:", error.message);
+    });
+}
+
+renderProfileAvatar();
 
 /* ---------- data ---------- */
 const STATUS_ORDER = ["reported", "verified", "repair", "restored"];
@@ -84,6 +115,73 @@ let mapFullscreen = false;
 const FEEDBACK_PENDING_KEY = "powergrid_feedback_pending";
 let feedback = [];
 let pendingFeedback = [];
+const OFFLINE_REPORT_DB = "powergrid-offline-reports";
+const OFFLINE_REPORT_STORE = "reports";
+let offlineReportDb;
+
+function openOfflineReportDb() {
+    if (!("indexedDB" in window)) {
+        return Promise.reject(new Error("This browser does not support saving reports offline."));
+    }
+    if (!offlineReportDb) {
+        offlineReportDb = new Promise((resolve, reject) => {
+            const request = indexedDB.open(OFFLINE_REPORT_DB, 1);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(OFFLINE_REPORT_STORE)) {
+                    request.result.createObjectStore(OFFLINE_REPORT_STORE, { keyPath: "id" });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("Could not open offline report storage."));
+            request.onblocked = () => reject(new Error("Offline report storage is busy in another tab."));
+        }).catch((error) => {
+            offlineReportDb = null;
+            throw error;
+        });
+    }
+    return offlineReportDb;
+}
+
+function withOfflineReports(mode, action) {
+    return openOfflineReportDb().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(OFFLINE_REPORT_STORE, mode);
+        let result;
+        const request = action(transaction.objectStore(OFFLINE_REPORT_STORE));
+        request.onsuccess = () => { result = request.result; };
+        request.onerror = () => reject(request.error || new Error("Could not access offline report storage."));
+        transaction.oncomplete = () => resolve(result);
+        transaction.onerror = () => reject(transaction.error || new Error("Offline report storage failed."));
+        transaction.onabort = () => reject(transaction.error || new Error("Offline report storage was interrupted."));
+    }));
+}
+
+function readOfflineReport(id) {
+    return withOfflineReports("readonly", (store) => store.get(id));
+}
+
+function readAllOfflineReports() {
+    return withOfflineReports("readonly", (store) => store.getAll());
+}
+
+function writeOfflineReport(record) {
+    return withOfflineReports("readwrite", (store) => store.put(record));
+}
+
+function deleteOfflineReport(id) {
+    return withOfflineReports("readwrite", (store) => store.delete(id));
+}
+
+function enqueueOfflineReport(record, draftId) {
+    return openOfflineReportDb().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(OFFLINE_REPORT_STORE, "readwrite");
+        const store = transaction.objectStore(OFFLINE_REPORT_STORE);
+        store.put(record);
+        store.delete(draftId);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error("Could not queue the outage report."));
+        transaction.onabort = () => reject(transaction.error || new Error("Could not queue the outage report."));
+    }));
+}
 
 try {
     pendingFeedback = JSON.parse(localStorage.getItem(FEEDBACK_PENDING_KEY)) || [];
@@ -292,6 +390,7 @@ function showPage(name) {
         return 0;
     }
     const next = $(`#${name}-page`);
+    if (!next) return 0;
     const current = $(".page.view-active");
     const token = ++pageToken;
 
@@ -330,14 +429,18 @@ window.addEventListener("resize", syncSliders);
 window.addEventListener("load", syncSliders);
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncSliders);
 
-// Keyboard shortcuts: 1 Live Map, 2 Report, 3 Network, 4 Admin
+// Keyboard shortcuts: 1 Live Map, 2 Report, 3 Admin
 document.addEventListener("keydown", (e) => {
+    if (!$("#profile-dialog").hidden) {
+        if (e.key === "Escape") closeProfileDialog();
+        return;
+    }
     if (e.key === "Escape" && mapFullscreen) {
         setMapFullscreen(false);
         return;
     }
     if (e.target.matches("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const pages = { "1": "map", "2": "report", "3": "network", "4": "admin" };
+    const pages = { "1": "map", "2": "report", "3": "admin" };
     if (pages[e.key]) showPage(pages[e.key]);
 });
 
@@ -351,6 +454,58 @@ document.addEventListener("pointermove", (e) => {
 });
 
 /* ---------- map ---------- */
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+const reverseGeocodeCache = new Map();
+let reverseGeocodeQueue = Promise.resolve();
+let lastReverseGeocodeAt = 0;
+let locationLookupRequestId = 0;
+let autoDetectedLandmark = "";
+
+function formatReverseGeocodeResult(result) {
+    const address = result.address || {};
+    const road = address.road || address.pedestrian || address.footway ||
+        address.path || address.residential || address.highway;
+    const street = [address.house_number, road].filter(Boolean).join(" ");
+    const area = address.neighbourhood || address.suburb || address.quarter ||
+        address.village || address.town || address.city_district;
+    const location = [result.name, street, area]
+        .filter((part, index, parts) => part && parts.indexOf(part) === index)
+        .join(", ") || String(result.display_name || "").split(",").slice(0, 3).join(",").trim();
+    return location.slice(0, 200);
+}
+
+function reverseGeocodeLocation(coords) {
+    const cacheKey = coords.map((coordinate) => coordinate.toFixed(5)).join(",");
+    if (reverseGeocodeCache.has(cacheKey)) {
+        return Promise.resolve(reverseGeocodeCache.get(cacheKey));
+    }
+
+    const request = reverseGeocodeQueue.then(async () => {
+        const delay = Math.max(0, lastReverseGeocodeAt + NOMINATIM_MIN_INTERVAL_MS - Date.now());
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+
+        lastReverseGeocodeAt = Date.now();
+        const params = new URLSearchParams({
+            format: "jsonv2",
+            lat: String(coords[0]),
+            lon: String(coords[1]),
+            zoom: "18",
+            addressdetails: "1"
+        });
+        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?${params}`, {
+            headers: { Accept: "application/json" }
+        });
+        if (!response.ok) throw new Error(`Location lookup failed (${response.status}).`);
+
+        const result = await response.json();
+        const location = formatReverseGeocodeResult(result);
+        reverseGeocodeCache.set(cacheKey, location);
+        return location;
+    });
+    reverseGeocodeQueue = request.catch(() => {});
+    return request;
+}
+
 function initMap() {
     if (typeof L === "undefined") {
         $("#leaflet-map").innerHTML = '<div class="map-offline">The map needs an internet connection to load Leaflet and the map tiles.</div>';
@@ -362,7 +517,7 @@ function initMap() {
     map = L.map("leaflet-map", {
         zoomControl: false,
         attributionControl: true,
-        minZoom: 12,
+        minZoom: 13,
         maxZoom: 18,
         maxBounds: batangasCityBounds,
         maxBoundsViscosity: 1
@@ -371,11 +526,11 @@ function initMap() {
     L.control.zoom({ position: "bottomleft" }).addTo(map);
     window.outageMap = map;
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        minZoom: 12,
+    L.tileLayer("https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", {
+        minZoom: 13,
         maxZoom: 18,
         noWrap: true,
-        attribution: "&copy; OpenStreetMap contributors"
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles style by <a href="https://www.hotosm.org/">Humanitarian OpenStreetMap Team</a>, hosted by <a href="https://openstreetmap.fr/">OpenStreetMap France</a>'
     }).addTo(map);
 
     markerLayer = L.layerGroup().addTo(map);
@@ -383,13 +538,45 @@ function initMap() {
         if (!pinSelectionActive) return;
         report.coords = [event.latlng.lat, event.latlng.lng];
         report.pinSelected = true;
+        scheduleReportDraftSave();
         if (reportPinMarker) reportPinMarker.remove();
         reportPinMarker = L.marker(report.coords).addTo(map).bindTooltip("Report location", { permanent: true, direction: "top" });
-        $("#report-pin-status").textContent = `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`;
+        const pinStatus = `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`;
+        const landmarkInput = $("#landmark");
+        const landmarkBeforeLookup = landmarkInput.value.trim();
+        const canSuggestLandmark = !landmarkBeforeLookup || landmarkBeforeLookup === autoDetectedLandmark;
+        const lookupRequestId = ++locationLookupRequestId;
+        $("#report-pin-status").textContent = canSuggestLandmark
+            ? `${pinStatus}. Looking up a nearby street or landmark with OpenStreetMap…`
+            : `${pinStatus}. Your entered street or landmark was kept.`;
         pinSelectionActive = false;
         map.getContainer().style.cursor = "";
         $("#pin-return-report").hidden = false;
         toast("Report pin set. Return to the report form to continue.", "success");
+
+        if (canSuggestLandmark) {
+            reverseGeocodeLocation(report.coords).then((location) => {
+                if (lookupRequestId !== locationLookupRequestId || !report.pinSelected ||
+                    landmarkInput.value.trim() !== landmarkBeforeLookup) return;
+                if (!location) {
+                    $("#report-pin-status").textContent =
+                        `${pinStatus}. No street or landmark was found; enter one manually.`;
+                    return;
+                }
+
+                landmarkInput.value = location;
+                report.landmark = location;
+                autoDetectedLandmark = location;
+                scheduleReportDraftSave();
+                $("#report-pin-status").textContent =
+                    `${pinStatus}. Suggested location: ${location}. You can edit it.`;
+            }).catch((error) => {
+                if (lookupRequestId !== locationLookupRequestId || !report.pinSelected) return;
+                console.warn("Could not look up the pinned location:", error.message);
+                $("#report-pin-status").textContent =
+                    `${pinStatus}. Could not look up a street or landmark; enter one manually.`;
+            });
+        }
     });
 }
 
@@ -696,8 +883,10 @@ function renderStats() {
     tween($("#stat-active"), active.length);
     tween($("#stat-households"), active.reduce((sum, o) => sum + o.households, 0));
     tween($("#stat-restored"), outages.filter((o) => o.status === "restored").length);
-    const online = feeders.filter((f) => f.online).length;
-    $("#stat-feeders").innerHTML = `${online} <small>of ${feeders.length}</small>`;
+    if (isStaff) {
+        const online = feeders.filter((f) => f.online).length;
+        $("#stat-feeders").innerHTML = `${online} <small>of ${feeders.length}</small>`;
+    }
 }
 
 /* ---------- history and demo forecast ---------- */
@@ -1253,9 +1442,179 @@ const report = {
     pinSelected: false,
     startedAt: "",
     photo: null,
+    photoBlob: null,
+    photoName: "",
     photoLoading: false
 };
 let submittingReport = false;
+const reportOwner = String(user.email || user.id || "resident").trim().toLowerCase();
+const reportDraftId = `draft:${reportOwner}`;
+let reportDraftTouched = false;
+let reportDraftTimer = null;
+let syncingPendingReports = false;
+
+function currentReportDraft() {
+    return {
+        step: report.step,
+        barangay: report.barangay,
+        landmark: $("#landmark").value,
+        when: report.when,
+        households: clampHouseholds($("#households").value),
+        cause: report.cause,
+        notes: $("#notes").value,
+        coords: [...report.coords],
+        pinSelected: report.pinSelected,
+        startedAt: $("#outage-started-at").value,
+        photoBlob: report.photoBlob,
+        photoName: report.photoName
+    };
+}
+
+function hasReportDraftContent(draft) {
+    return Boolean(
+        String(draft.landmark || "").trim() ||
+        String(draft.notes || "").trim() ||
+        draft.startedAt ||
+        draft.photoBlob ||
+        draft.pinSelected ||
+        draft.step > 1 ||
+        draft.barangay !== defaultBarangay ||
+        draft.when !== "Just now" ||
+        draft.cause !== "Unknown" ||
+        draft.households !== 10
+    );
+}
+
+async function persistReportDraft() {
+    if (!reportDraftTouched) return;
+    const draft = currentReportDraft();
+    if (!hasReportDraftContent(draft)) {
+        await deleteOfflineReport(reportDraftId);
+        $("#report-draft-status").textContent = "Changes are saved on this device as you fill out the report.";
+        return;
+    }
+
+    await writeOfflineReport({
+        ...draft,
+        id: reportDraftId,
+        kind: "draft",
+        owner: reportOwner,
+        updatedAt: new Date().toISOString()
+    });
+    $("#report-draft-status").textContent = "Draft saved on this device. It has not been submitted.";
+}
+
+function scheduleReportDraftSave() {
+    reportDraftTouched = true;
+    clearTimeout(reportDraftTimer);
+    reportDraftTimer = setTimeout(() => {
+        persistReportDraft().catch((error) => {
+            console.error("Could not save outage report draft:", error.message);
+            $("#report-draft-status").textContent = `Could not save this draft locally: ${error.message}`;
+        });
+    }, 350);
+}
+
+async function restoreReportDraft() {
+    try {
+        const draft = await readOfflineReport(reportDraftId);
+        if (!draft || draft.kind !== "draft" || draft.owner !== reportOwner) return;
+
+        report.barangay = BARANGAYS[draft.barangay] ? draft.barangay : defaultBarangay;
+        report.landmark = String(draft.landmark || "");
+        report.when = String(draft.when || "Just now");
+        report.cause = String(draft.cause || "Unknown");
+        report.notes = String(draft.notes || "");
+        report.startedAt = String(draft.startedAt || "");
+        report.pinSelected = Boolean(draft.pinSelected);
+        report.coords = Array.isArray(draft.coords) && draft.coords.length === 2 &&
+            draft.coords.every((value) => Number.isFinite(Number(value)))
+            ? draft.coords.map(Number)
+            : [...BARANGAYS[report.barangay].coords];
+        report.photoBlob = draft.photoBlob instanceof Blob ? draft.photoBlob : null;
+        report.photoName = String(draft.photoName || "");
+        report.photo = report.photoBlob ? URL.createObjectURL(report.photoBlob) : null;
+        report.step = Math.max(1, Math.min(3, Number(draft.step) || 1));
+
+        $("#landmark").value = report.landmark;
+        $("#households").value = clampHouseholds(draft.households);
+        $("#notes").value = report.notes;
+        $("#outage-started-at").value = report.startedAt;
+        $("#report-pin-status").textContent = report.pinSelected
+            ? `Pinned at ${report.coords[0].toFixed(5)}, ${report.coords[1].toFixed(5)}`
+            : "No exact pin selected; the area center will be used.";
+        if (report.photoBlob) {
+            $("#report-photo-name").textContent = report.photoName || "Saved photo attached";
+            const preview = new Image();
+            preview.src = report.photo;
+            preview.alt = "Saved outage photo";
+            $("#report-photo-preview").replaceChildren(preview);
+        }
+
+        markDefaultBarangay();
+        $$(".chip-row").forEach((row) => {
+            $$(".chip", row).forEach((chip) =>
+                chip.classList.toggle("active", chip.textContent.trim() === report[row.dataset.group])
+            );
+        });
+        setStep(report.step, true);
+        reportDraftTouched = true;
+        $("#report-draft-status").textContent = "Restored your saved draft from this device. It has not been submitted.";
+    } catch (error) {
+        console.error("Could not restore outage report draft:", error.message);
+        $("#report-draft-status").textContent = `Could not restore the saved draft: ${error.message}`;
+    }
+}
+
+$("#report-panel").addEventListener("input", scheduleReportDraftSave);
+$("#report-panel").addEventListener("change", scheduleReportDraftSave);
+$("#report-panel").addEventListener("click", (event) => {
+    if (event.target.closest("#report-next")) {
+        if (report.step < 3) scheduleReportDraftSave();
+        return;
+    }
+    if (event.target.closest("#sync-pending-reports, [data-remove-report]")) return;
+    if (event.target.closest("button")) scheduleReportDraftSave();
+});
+
+async function renderPendingReports() {
+    const records = await readAllOfflineReports();
+    const pending = records
+        .filter((record) => record.kind === "pending" && record.owner === reportOwner)
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    const panel = $("#pending-reports");
+    panel.hidden = pending.length === 0;
+    $("#pending-reports-title").textContent = `Reports waiting to sync (${pending.length})`;
+    $("#sync-pending-reports").disabled = !navigator.onLine || syncingPendingReports || pending.length === 0;
+    $("#pending-report-list").innerHTML = pending.map((record) => `
+        <article class="pending-report-item">
+            <div>
+                <strong>${esc(record.body.barangay)} · ${esc(record.body.landmark)}</strong>
+                <p>${record.lastError ? `Last attempt failed: ${esc(record.lastError)}` : `Saved ${esc(new Date(record.createdAt).toLocaleString())}`}</p>
+            </div>
+            <button class="ghost-button" type="button" data-remove-report="${esc(record.id)}">Remove</button>
+        </article>
+    `).join("");
+}
+
+async function queueReportForLater(body, photoBlob) {
+    clearTimeout(reportDraftTimer);
+    const record = {
+        id: `pending:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        kind: "pending",
+        owner: reportOwner,
+        body,
+        photoBlob: photoBlob || null,
+        createdAt: new Date().toISOString(),
+        lastError: ""
+    };
+    await enqueueOfflineReport(record, reportDraftId);
+    reportDraftTouched = false;
+    resetReport();
+    $("#report-draft-status").textContent = "Report saved on this device. It will sync when you reconnect.";
+    await renderPendingReports();
+    toast(`Report for ${body.barangay} saved on this device`, "info");
+}
 
 function renderBarangayOptions() {
     if (!BARANGAYS[report.barangay]) {
@@ -1344,7 +1703,7 @@ async function submitReport() {
         toast("Wait for the selected photo to finish processing", "info");
         return;
     }
-    const hasPhoto = Boolean(report.photo);
+    const photoBlob = report.photoBlob;
     const barangay = report.barangay;
     const body = {
         barangay: report.barangay,
@@ -1367,23 +1726,38 @@ async function submitReport() {
     submittingReport = true;
     $("#report-next").disabled = true;
     try {
-        let requestBody = body;
-        if (report.photo) {
-            const photoResponse = await fetch(report.photo);
-            if (!photoResponse.ok) throw new Error("Could not prepare the selected photo for upload.");
-            const formData = new FormData();
-            Object.entries(body).forEach(([key, value]) => formData.append(key, String(value)));
-            formData.append("photo", await photoResponse.blob(), "outage-report.jpg");
-            requestBody = formData;
+        if (!navigator.onLine) {
+            await queueReportForLater(body, photoBlob);
+            return;
+        }
+
+        const requestBody = photoBlob ? new FormData() : body;
+        if (photoBlob) {
+            Object.entries(body).forEach(([key, value]) => requestBody.append(key, String(value)));
+            requestBody.append("photo", photoBlob, "outage-report.jpg");
         }
         const response = await Auth.request("/api/incidents/reports", { method: "POST", body: requestBody });
+        if (response.status === 0) {
+            await queueReportForLater(body, photoBlob);
+            return;
+        }
         if (response.status < 200 || response.status >= 300 || !response.data.ok) {
             const fieldErrors = response.data.errors ? Object.values(response.data.errors).join(" ") : "";
             throw new Error(fieldErrors || response.data.error || "Could not submit outage report.");
         }
         const incidentId = Number(response.data.incident_id);
+        clearTimeout(reportDraftTimer);
+        let draftCleanupWarning = "";
+        try {
+            await deleteOfflineReport(reportDraftId);
+        } catch (error) {
+            console.error("Could not clear the submitted report draft:", error.message);
+            draftCleanupWarning = " The local draft could not be cleared.";
+        }
+        reportDraftTouched = false;
         resetReport();
-        toast(`Report #${incidentId} saved for ${barangay}${hasPhoto ? " with photo" : ""}`, "success");
+        $("#report-draft-status").textContent = `Your report was submitted.${draftCleanupWarning}`;
+        toast(`Report #${incidentId} saved for ${barangay}${photoBlob ? " with photo" : ""}`, "success");
         if (await loadIncidents(false)) showOnMap(incidentId);
         else toast("The report was saved, but the outage list could not be refreshed.", "danger");
     } catch (error) {
@@ -1401,6 +1775,7 @@ function markDefaultBarangay() {
 function resetReport() {
     pinSelectionActive = false;
     if (map) map.getContainer().style.cursor = "";
+    if (report.photo) URL.revokeObjectURL(report.photo);
     $("#pin-return-report").hidden = true;
     Object.assign(report, {
         barangay: defaultBarangay,
@@ -1413,6 +1788,8 @@ function resetReport() {
         pinSelected: false,
         startedAt: "",
         photo: null,
+        photoBlob: null,
+        photoName: "",
         photoLoading: false
     });
     $("#landmark").value = "";
@@ -1452,6 +1829,8 @@ $("#report-barangay-options").addEventListener("click", (e) => {
 });
 
 $("#landmark").addEventListener("input", (e) => {
+    locationLookupRequestId += 1;
+    autoDetectedLandmark = "";
     report.landmark = e.target.value;
 });
 $("#landmark").addEventListener("keydown", (e) => {
@@ -1514,12 +1893,23 @@ $("#report-photo").addEventListener("change", (e) => {
                 return;
             }
             context.drawImage(image, 0, 0, canvas.width, canvas.height);
-            report.photo = canvas.toDataURL("image/jpeg", 0.65);
-            const preview = new Image();
-            preview.src = report.photo;
-            preview.alt = "Selected outage photo";
-            $("#report-photo-preview").replaceChildren(preview);
-            report.photoLoading = false;
+            canvas.toBlob((blob) => {
+                if (!blob) {
+                    report.photoLoading = false;
+                    toast("Could not process this photo", "danger");
+                    return;
+                }
+                if (report.photo) URL.revokeObjectURL(report.photo);
+                report.photoBlob = blob;
+                report.photoName = file.name;
+                report.photo = URL.createObjectURL(blob);
+                const preview = new Image();
+                preview.src = report.photo;
+                preview.alt = "Selected outage photo";
+                $("#report-photo-preview").replaceChildren(preview);
+                report.photoLoading = false;
+                scheduleReportDraftSave();
+            }, "image/jpeg", 0.65);
         });
         image.addEventListener("error", () => {
             report.photoLoading = false;
@@ -1673,6 +2063,7 @@ updateSmsLink();
 
 /* ---------- network simulation ---------- */
 function renderNetwork() {
+    if (!isStaff) return;
     $$(".feeder").forEach((el, i) => {
         const f = feeders[i];
         el.classList.toggle("offline", !f.online);
@@ -1703,6 +2094,7 @@ function renderNetwork() {
 }
 
 function toggleFeeder(i) {
+    if (!isStaff) return;
     const feeder = feeders[i];
     feeder.online = !feeder.online;
     const affected = Object.keys(BARANGAYS).filter((name) => BARANGAYS[name].feeder === i);
@@ -1742,28 +2134,29 @@ function toggleFeeder(i) {
     renderAll();
 }
 
-$$(".cut-button").forEach((button, i) => button.addEventListener("click", () => toggleFeeder(i)));
+if (isStaff) {
+    $$(".cut-button").forEach((button, i) => button.addEventListener("click", () => toggleFeeder(i)));
 
-$(".network-barangays").addEventListener("click", (e) => {
-    const button = e.target.closest(".net-brgy");
-    if (!button) return;
-    const name = button.dataset.barangay;
-    const active = outages.find((o) => o.barangay === name && o.status !== "restored");
-    if (active) showOnMap(active.id);
-    else toast(`${name} has power and no active outages`, "success");
-});
-
-$$(".proto").forEach((chip) => chip.addEventListener("click", () => toast(chip.dataset.info, "info")));
-
-// Simulated heartbeat: online feeders report new latency every 2 seconds
-setInterval(() => {
-    feeders.forEach((f) => {
-        if (!f.online) return;
-        f.latency = 12 + Math.floor(Math.random() * 30);
-        f.loss = Math.random() < 0.12 ? 1 : 0;
+    $(".network-barangays").addEventListener("click", (e) => {
+        const button = e.target.closest(".net-brgy");
+        if (!button) return;
+        const name = button.dataset.barangay;
+        const active = outages.find((o) => o.barangay === name && o.status !== "restored");
+        if (active) showOnMap(active.id);
+        else toast(`${name} has power and no active outages`, "success");
     });
-    renderNetwork();
-}, 2000);
+
+    $$(".proto").forEach((chip) => chip.addEventListener("click", () => toast(chip.dataset.info, "info")));
+
+    setInterval(() => {
+        feeders.forEach((f) => {
+            if (!f.online) return;
+            f.latency = 12 + Math.floor(Math.random() * 30);
+            f.loss = Math.random() < 0.12 ? 1 : 0;
+        });
+        renderNetwork();
+    }, 2000);
+}
 
 /* ---------- render everything ---------- */
 function renderAll() {
@@ -1788,7 +2181,14 @@ if ("serviceWorker" in navigator) {
 function updateConnectivity() {
     const banner = $("#offline-banner");
     if (banner) banner.hidden = navigator.onLine;
-    if (navigator.onLine) syncPendingFeedback();
+    if (navigator.onLine) {
+        syncPendingFeedback();
+        syncPendingReports();
+    } else {
+        renderPendingReports().catch((error) => {
+            $("#report-draft-status").textContent = `Could not read saved reports: ${error.message}`;
+        });
+    }
 }
 
 async function syncPendingFeedback() {
@@ -1817,18 +2217,84 @@ async function syncPendingFeedback() {
     }
 }
 
+async function syncPendingReports() {
+    if (syncingPendingReports || !navigator.onLine) return;
+    syncingPendingReports = true;
+    let synced = 0;
+    try {
+        const pending = (await readAllOfflineReports())
+            .filter((record) => record.kind === "pending" && record.owner === reportOwner)
+            .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+
+        for (const record of pending) {
+            const body = record.photoBlob ? new FormData() : record.body;
+            if (record.photoBlob) {
+                Object.entries(record.body).forEach(([key, value]) => body.append(key, String(value)));
+                body.append("photo", record.photoBlob, "outage-report.jpg");
+            }
+            const response = await Auth.request("/api/incidents/reports", { method: "POST", body });
+            if (response.status === 0) break;
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                record.lastError = response.data.error || `HTTP ${response.status}`;
+                record.lastAttemptAt = new Date().toISOString();
+                await writeOfflineReport(record);
+                continue;
+            }
+            await deleteOfflineReport(record.id);
+            synced++;
+        }
+
+        if (synced) {
+            $("#report-draft-status").textContent = `${synced} saved outage ${synced === 1 ? "report was" : "reports were"} synced.`;
+            toast(`${synced} saved outage ${synced === 1 ? "report" : "reports"} synced`, "success");
+            await loadIncidents(false);
+        }
+    } catch (error) {
+        console.error("Could not sync offline outage reports:", error.message);
+        $("#report-draft-status").textContent = `Could not sync saved reports: ${error.message}`;
+    } finally {
+        syncingPendingReports = false;
+        try {
+            await renderPendingReports();
+        } catch (error) {
+            console.error("Could not refresh the offline report queue:", error.message);
+        }
+    }
+}
+
+$("#sync-pending-reports").addEventListener("click", syncPendingReports);
+$("#pending-report-list").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-remove-report]");
+    if (!button || !confirm("Remove this saved outage report from this device? This cannot be undone.")) return;
+    try {
+        await deleteOfflineReport(button.dataset.removeReport);
+        await renderPendingReports();
+        toast("Saved outage report removed", "info");
+    } catch (error) {
+        console.error("Could not remove saved outage report:", error.message);
+        toast(`Could not remove saved report: ${error.message}`, "danger");
+    }
+});
+
 window.addEventListener("online", updateConnectivity);
 window.addEventListener("offline", updateConnectivity);
 
-renderAreaAdmin();
-renderUserAdmin();
+if (isStaff) {
+    renderAreaAdmin();
+    renderUserAdmin();
+}
 initMap();
-log("Browser network simulation ready; MQTT sensor adapter is disabled by default");
+if (isStaff) log("Browser network simulation ready; MQTT sensor adapter is disabled by default");
 renderAll();
 renderFeedback();
 markDefaultBarangay();
 setStep(1, true);
 syncSliders();
+restoreReportDraft();
+renderPendingReports().catch((error) => {
+    console.error("Could not load offline outage reports:", error.message);
+    $("#report-draft-status").textContent = `Could not load saved reports: ${error.message}`;
+});
 updateConnectivity();
 loadIncidents();
 loadBarangays();
@@ -1859,6 +2325,106 @@ document.addEventListener("pointerdown", (e) => {
     button.append(ripple);
     ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
     setTimeout(() => ripple.remove(), 900);
+});
+
+/* ---------- profile editor ---------- */
+function updateProfilePreview(photoUrl) {
+    const initial = $("#profile-photo-initial");
+    const image = $("#profile-photo-image");
+    initial.textContent = $("#profile-name").value.trim().charAt(0).toUpperCase() || "?";
+    image.hidden = !photoUrl;
+    initial.hidden = Boolean(photoUrl);
+    if (photoUrl) image.src = photoUrl;
+    else image.removeAttribute("src");
+}
+
+function resetProfilePhotoPreview() {
+    if (profilePreviewObjectUrl) {
+        URL.revokeObjectURL(profilePreviewObjectUrl);
+        profilePreviewObjectUrl = null;
+    }
+    $("#profile-photo").value = "";
+    updateProfilePreview(profileAvatarObjectUrl);
+}
+
+function openProfileDialog() {
+    $("#profile-name").value = user.name;
+    $("#profile-email").textContent = `Sign-in email: ${user.email}`;
+    $("#profile-message").textContent = "";
+    $("#profile-message").classList.remove("error");
+    resetProfilePhotoPreview();
+    $("#profile-dialog").hidden = false;
+    $("#profile-name").focus();
+}
+
+function closeProfileDialog() {
+    $("#profile-dialog").hidden = true;
+    resetProfilePhotoPreview();
+    $("#profile-open").focus();
+}
+
+$("#profile-open").addEventListener("click", openProfileDialog);
+$$("[data-profile-close]").forEach((button) => {
+    button.addEventListener("click", closeProfileDialog);
+});
+
+$("#profile-photo").addEventListener("change", (event) => {
+    const file = event.target.files[0];
+    if (!file) {
+        resetProfilePhotoPreview();
+        return;
+    }
+    if (!["image/jpeg", "image/png"].includes(file.type) || file.size > 2 * 1024 * 1024) {
+        resetProfilePhotoPreview();
+        $("#profile-message").textContent = "Choose a JPG or PNG image that is 2 MB or smaller.";
+        $("#profile-message").classList.add("error");
+        return;
+    }
+    if (profilePreviewObjectUrl) URL.revokeObjectURL(profilePreviewObjectUrl);
+    profilePreviewObjectUrl = URL.createObjectURL(file);
+    updateProfilePreview(profilePreviewObjectUrl);
+    $("#profile-message").textContent = "";
+    $("#profile-message").classList.remove("error");
+});
+
+$("#profile-name").addEventListener("input", () => {
+    if (!profilePreviewObjectUrl) updateProfilePreview(profileAvatarObjectUrl);
+});
+
+$("#profile-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const saveButton = $("#profile-save");
+    const message = $("#profile-message");
+    const formData = new FormData();
+    formData.set("name", $("#profile-name").value.trim());
+    const photo = $("#profile-photo").files[0];
+    if (photo) formData.set("photo", photo);
+
+    saveButton.disabled = true;
+    message.textContent = "Saving your profile…";
+    message.classList.remove("error");
+    try {
+        const { status, data } = await Auth.request("/api/auth/me", {
+            method: "PATCH",
+            body: formData
+        });
+        if (status === 0) throw new Error("Could not reach the server. Check your connection and try again.");
+        if (!data.ok || !data.user) throw new Error(data.error || "Could not update your profile.");
+
+        Object.assign(user, data.user);
+        Auth.updateCurrentUser(user);
+        $("#user-name").textContent = user.name;
+        $("#user-name").title = user.email;
+        $("#user-role").textContent = isStaff ? "Staff" : `Resident · ${user.barangay}`;
+        renderProfileAvatar();
+        closeProfileDialog();
+        toast("Profile updated", "success");
+    } catch (error) {
+        message.textContent = error.message || "Could not update your profile.";
+        message.classList.add("error");
+    } finally {
+        saveButton.disabled = false;
+    }
 });
 
 /* ---------- log out + welcome ---------- */
