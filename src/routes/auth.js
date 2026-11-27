@@ -37,6 +37,7 @@ const registerSchema = z.object({
 const loginSchema = z.object({
     email: z.string().trim().email("Enter a valid email address.").max(254),
     password: z.string().min(1, "Enter your password."),
+    audience: z.enum(["resident", "staff"]),
     remember: z.boolean().optional()
 });
 
@@ -90,8 +91,8 @@ router.post("/register", async (req, res, next) => {
 
         const passwordHash = await bcrypt.hash(password, 10);
         const result = await query(
-            `INSERT INTO users (name, email, password_hash, barangay_id)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO users (name, email, password_hash, barangay_id, role)
+             VALUES ($1, $2, $3, $4, 'resident')
              RETURNING id, name, email, role, barangay_id`,
             [name, email, passwordHash, area.rows[0].id]
         );
@@ -137,9 +138,16 @@ router.post("/login", async (req, res, next) => {
             parsed.data.password,
             record ? record.password_hash : DUMMY_HASH
         );
+        const roleMatches = record && (
+            (parsed.data.audience === "staff" && record.role === "admin") ||
+            (parsed.data.audience === "resident" && record.role === "resident")
+        );
 
-        if (!record || !passwordMatches) {
-            return res.status(401).json({ ok: false, error: "Email or password is incorrect." });
+        if (!record || !passwordMatches || !roleMatches) {
+            return res.status(401).json({
+                ok: false,
+                error: "Email or password is incorrect, or this account cannot use this sign-in page."
+            });
         }
 
         const user = publicUser(record, record.barangay);

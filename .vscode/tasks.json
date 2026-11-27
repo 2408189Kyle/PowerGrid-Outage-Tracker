@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PowerGrid: start backend",
+            "type": "npm",
+            "script": "dev",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "powergrid",
+                "pattern": {
+                    "regexp": "^$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^> powergrid-outage-tracker@.* dev$",
+                    "endsPattern": "^PowerGrid server running at http://localhost:3002$"
+                }
+            }
+        }
+    ]
+}

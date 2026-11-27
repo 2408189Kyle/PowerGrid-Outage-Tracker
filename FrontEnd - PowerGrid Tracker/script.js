@@ -40,6 +40,7 @@ $("#user-role").textContent = isStaff ? "Staff" : `Resident · ${user.barangay}`
 const STATUS_ORDER = ["reported", "verified", "repair", "restored"];
 const STATUS_LABEL = { reported: "Reported", verified: "Verified", repair: "Under Repair", restored: "Restored" };
 const ETA_BY_STATUS = { reported: "TBD", verified: "~1h 30m", repair: "~45m", restored: "Restored" };
+const API_STATUS = { reported: "Reported", verified: "Verified", repair: "Under Repair", restored: "Restored" };
 
 function estimateRestoration(outage) {
     if (outage.status === "restored") return "Restored";
@@ -65,25 +66,14 @@ const BARANGAYS = {
     "Bolbok":            { coords: [13.7722, 121.0528], feeder: 2 },
     "Sta. Rita Karsada": { coords: [13.7460, 121.0690], feeder: 2 }
 };
-try {
-    const savedAreas = JSON.parse(localStorage.getItem("powergrid_areas"));
-    const validAreas = Array.isArray(savedAreas)
-        ? savedAreas.filter((area) => area && typeof area.name === "string" && Array.isArray(area.coords) && Number.isInteger(area.feeder))
-        : [];
-    if (validAreas.length) {
-        Object.keys(BARANGAYS).forEach((name) => delete BARANGAYS[name]);
-        validAreas.forEach((area) => {
-            BARANGAYS[area.name] = { coords: area.coords, feeder: Math.max(0, Math.min(2, area.feeder)) };
-        });
-    }
-} catch {
-    // Keep the built-in barangay list when saved data is invalid.
-}
+const feederRecords = [];
 
 const feeders = [0, 1, 2].map(() => ({ online: true, latency: 18, loss: 0 }));
 const outages = [];
+const reportPhotoUrls = new Map();
+let photoLoadWarningShown = false;
 let nextId = 1;
-let selectedId = 1;
+let selectedId = 0;
 let filter = "all";
 let lastChangedId = null;
 let map = null;
@@ -91,16 +81,10 @@ let markerLayer = null;
 const mapArea = $("#map-area");
 let mapPlaceholder = null;
 let mapFullscreen = false;
-const FEEDBACK_KEY = "powergrid_feedback";
 const FEEDBACK_PENDING_KEY = "powergrid_feedback_pending";
 let feedback = [];
 let pendingFeedback = [];
 
-try {
-    feedback = JSON.parse(localStorage.getItem(FEEDBACK_KEY)) || [];
-} catch {
-    feedback = [];
-}
 try {
     pendingFeedback = JSON.parse(localStorage.getItem(FEEDBACK_PENDING_KEY)) || [];
 } catch {
@@ -141,33 +125,75 @@ function addOutage({ barangay, address, households, status = "reported", eta, au
     return outage;
 }
 
-// Starting sample data (same five reports as before)
-addOutage({ barangay: "Poblacion",       address: "P. Burgos Street",    households: 48, status: "verified", eta: "1h 10m", since: "Earlier today" });
-addOutage({ barangay: "Kumintang Ibaba", address: "Kumintang Road",      households: 12, status: "reported", eta: "55m",    since: "Earlier today" });
-addOutage({ barangay: "Alangilan",       address: "Alangilan Main Road", households: 35, status: "repair",   eta: "2h",     since: "Earlier today" });
-addOutage({ barangay: "Bolbok",          address: "Bolbok Crossing",     households: 20, status: "restored", eta: "Restored", since: "Earlier today" });
-addOutage({ barangay: "Pallocan West",   address: "Pallocan Road",       households: 7,  status: "reported", eta: "45m",    since: "Earlier today" });
+function toOutage(incident) {
+    const status = incident.ui_status || "reported";
+    const coords = [Number(incident.latitude), Number(incident.longitude)];
+    return {
+        id: Number(incident.id),
+        barangay: incident.barangay,
+        address: incident.landmark || (incident.source === "system" ? "Detected by network monitor" : "Location not provided"),
+        households: Number(incident.est_households) || 0,
+        status,
+        eta: estimateRestoration({ status, households: Number(incident.est_households) || 0 }),
+        auto: incident.source === "system" ? 0 : null,
+        cause: incident.cause || "Unknown",
+        since: "Reported",
+        reporter: incident.reporter || null,
+        notes: incident.notes || "",
+        photo: null,
+        photoUrl: incident.photo_url || null,
+        startedAt: incident.started_at || null,
+        createdAt: incident.created_at || incident.started_at || new Date().toISOString(),
+        reportCount: Number(incident.report_count) || 1,
+        coords
+    };
+}
 
-try {
-    const saved = JSON.parse(localStorage.getItem("powergrid_live_state"));
-    if (saved && Array.isArray(saved.outages) && Array.isArray(saved.feeders)) {
-        outages.splice(0, outages.length, ...saved.outages);
-        outages.forEach((outage) => {
-            outage.createdAt = outage.createdAt || new Date().toISOString();
-            outage.reportCount = outage.reportCount || 1;
-            outage.notes = outage.notes || "";
-            outage.photo = outage.photo || null;
-            outage.startedAt = outage.startedAt || null;
-            outage.eta = estimateRestoration(outage);
-        });
-        saved.feeders.forEach((f, i) => {
-            if (feeders[i]) Object.assign(feeders[i], f);
-        });
-        nextId = outages.reduce((max, o) => Math.max(max, Number(o.id) || 0), 0) + 1;
-        selectedId = outages.some((o) => o.id === saved.selectedId) ? saved.selectedId : outages[0]?.id || 0;
+async function loadIncidents(showError = true) {
+    try {
+        const response = await Auth.request("/api/incidents");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.incidents)) {
+            throw new Error(response.data.error || "Could not load outage reports.");
+        }
+
+        const loaded = response.data.incidents.map(toOutage);
+        const activePhotoUrls = new Set(loaded.map((outage) => outage.photoUrl).filter(Boolean));
+        let photoErrors = 0;
+        await Promise.all(loaded.map(async (outage) => {
+            if (!outage.photoUrl) return;
+            try {
+                if (!reportPhotoUrls.has(outage.photoUrl)) {
+                    reportPhotoUrls.set(outage.photoUrl, await Auth.requestImage(outage.photoUrl));
+                }
+                outage.photo = reportPhotoUrls.get(outage.photoUrl);
+            } catch (error) {
+                photoErrors++;
+                console.error("Could not load incident photo:", error.message);
+            }
+        }));
+        for (const [url, objectUrl] of reportPhotoUrls) {
+            if (!activePhotoUrls.has(url)) {
+                URL.revokeObjectURL(objectUrl);
+                reportPhotoUrls.delete(url);
+            }
+        }
+        outages.splice(0, outages.length, ...loaded);
+        nextId = outages.reduce((max, outage) => Math.max(max, outage.id), 0) + 1;
+        if (!outages.some((outage) => outage.id === selectedId)) {
+            selectedId = outages[0] ? outages[0].id : 0;
+        }
+        renderAll();
+        if (photoErrors && !photoLoadWarningShown) {
+            toast("Some report photos could not be loaded.", "danger");
+            photoLoadWarningShown = true;
+        } else if (!photoErrors) {
+            photoLoadWarningShown = false;
+        }
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load outage reports.", "danger");
+        return false;
     }
-} catch {
-    // Keep the sample state if saved browser data is invalid.
 }
 
 /* ---------- small UI helpers ---------- */
@@ -371,6 +397,7 @@ const markersById = new Map();
 let pinSelectionActive = false;
 let reportPinMarker = null;
 const mapSearch = { text: "", barangay: "", from: "", to: "" };
+if (location.hash === "#admin" && isStaff) showPage("admin");
 
 function setMapFullscreen(expanded) {
     if (expanded === mapFullscreen) return;
@@ -475,6 +502,7 @@ function showOnMap(id) {
 
 function renderCard(animate = false) {
     const o = outages.find((x) => x.id === selectedId);
+    $("#outage-card").hidden = !o;
     if (!o) return;
     $(".card-kicker").textContent = `SELECTED OUTAGE #${o.id}`;
     $("#card-name").textContent = o.barangay;
@@ -804,17 +832,26 @@ function flashCard(id) {
     card.classList.add("flash");
 }
 
-function moveOutage(outage, direction) {
+async function moveOutage(outage, direction) {
     const next = STATUS_ORDER[STATUS_ORDER.indexOf(outage.status) + direction];
     if (!next) return;
-    outage.status = next;
-    outage.eta = estimateRestoration(outage);
+    const response = await Auth.request(`/api/incidents/${outage.id}/status`, {
+        method: "PATCH",
+        body: { status: API_STATUS[next] }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not update incident status.", "danger");
+        return;
+    }
     lastChangedId = outage.id;
-    renderAll();
+    if (!await loadIncidents(false)) {
+        toast("Status updated, but the outage list could not be refreshed.", "danger");
+        return;
+    }
     toast(`#${outage.id} ${outage.barangay} → ${STATUS_LABEL[next]}`, next === "restored" ? "success" : "info");
 }
 
-$(".admin-columns").addEventListener("click", (e) => {
+$(".admin-columns").addEventListener("click", async (e) => {
     const card = e.target.closest(".report-card");
     if (!card) return;
     const outage = outages.find((o) => o.id === Number(card.dataset.id));
@@ -832,15 +869,29 @@ $(".admin-columns").addEventListener("click", (e) => {
                 toast("Keep a location and enter 1–5000 households", "danger");
                 return;
             }
-            outage.address = address.trim();
-            outage.households = households;
-            outage.eta = estimateRestoration(outage);
-            renderAll();
+            const response = await Auth.request(`/api/incidents/${outage.id}`, {
+                method: "PATCH",
+                body: { landmark: address.trim(), households }
+            });
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                toast(response.data.error || "Could not update report.", "danger");
+                return;
+            }
+            if (!await loadIncidents(false)) {
+                toast("Report updated, but the outage list could not be refreshed.", "danger");
+                return;
+            }
             toast(`Report #${outage.id} updated`, "success");
         } else if (action === "delete" && confirm(`Delete report #${outage.id}?`)) {
-            outages.splice(outages.indexOf(outage), 1);
-            selectedId = outages[0] ? outages[0].id : 0;
-            renderAll();
+            const response = await Auth.request(`/api/incidents/${outage.id}`, { method: "DELETE" });
+            if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+                toast(response.data.error || "Could not delete report.", "danger");
+                return;
+            }
+            if (!await loadIncidents(false)) {
+                toast("Report deleted, but the outage list could not be refreshed.", "danger");
+                return;
+            }
             toast("Report deleted", "info");
         }
     } else if (e.target.closest("h4")) {
@@ -848,56 +899,80 @@ $(".admin-columns").addEventListener("click", (e) => {
     }
 });
 
-const ANNOUNCEMENTS_KEY = "powergrid_announcements";
 let announcements = [];
-try {
-    announcements = JSON.parse(localStorage.getItem(ANNOUNCEMENTS_KEY)) || [];
-} catch {
-    announcements = [];
-}
-if (!announcements.length) {
-    announcements = [{ id: Date.now(), text: "Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.", createdAt: new Date().toISOString() }];
-}
 
 function renderAnnouncements() {
-    const newest = announcements[0];
+    const now = Date.now();
+    const newest = announcements
+        .filter((item) =>
+            (!item.starts_at || Date.parse(item.starts_at) <= now) &&
+            (!item.ends_at || Date.parse(item.ends_at) >= now)
+        )
+        .sort((a, b) => Date.parse(b.starts_at || b.created_at) - Date.parse(a.starts_at || a.created_at))[0];
     $$(".announcement p").forEach((p) => {
         const label = document.createElement("strong");
-        const typeLabels = { maintenance: "Maintenance:", weather: "Weather advisory:", general: "Update:" };
+        const typeLabels = { maintenance: "Maintenance:", advisory: "Advisory:" };
         label.textContent = newest ? typeLabels[newest.type] || "Announcement:" : "Announcement:";
-        p.replaceChildren(label, ` ${newest ? newest.text : "No current advisories."}`);
+        p.replaceChildren(label, ` ${newest ? `${newest.title} — ${newest.body}` : "No current advisories."}`);
     });
     const list = $("#announcement-list");
     list.innerHTML = announcements.map((item) => `
         <article class="announcement-item">
-            <span><strong>${esc(item.type || "general")}</strong> · ${esc(item.text)}<small>${esc(new Date(item.createdAt).toLocaleString())}</small></span>
-            <button type="button" class="back-button" data-announcement-edit="${item.id}">Edit</button>
-            <button type="button" class="back-button" data-announcement-delete="${item.id}">Delete</button>
+            <span><strong>${esc(item.title)}</strong> · ${esc(item.type)} · ${esc(item.body)}<small>${esc(new Date(item.created_at).toLocaleString())}</small></span>
+            <button type="button" class="back-button" data-announcement-edit="${Number(item.id)}">Edit</button>
+            <button type="button" class="back-button" data-announcement-delete="${Number(item.id)}">Delete</button>
         </article>`).join("") || '<p class="feedback-empty">No announcements.</p>';
 }
 
-function saveAnnouncements() {
-    localStorage.setItem(ANNOUNCEMENTS_KEY, JSON.stringify(announcements));
-    renderAnnouncements();
+async function loadAnnouncements(showError = true) {
+    try {
+        const endpoint = isStaff ? "/api/announcements/manage" : "/api/announcements";
+        const response = await Auth.request(endpoint);
+        if (response.status < 200 || response.status >= 300 ||
+            !response.data.ok || !Array.isArray(response.data.announcements)) {
+            throw new Error(response.data.error || "Could not load announcements.");
+        }
+        announcements = response.data.announcements;
+        renderAnnouncements();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load announcements.", "danger");
+        return false;
+    }
 }
 
-$("#announcement-list").addEventListener("click", (e) => {
+$("#announcement-list").addEventListener("click", async (e) => {
     const edit = e.target.closest("[data-announcement-edit]");
     const remove = e.target.closest("[data-announcement-delete]");
     if (edit) {
         const item = announcements.find((a) => a.id === Number(edit.dataset.announcementEdit));
         if (!item) return;
-        const text = prompt("Edit announcement:", item.text);
-        if (text === null || !text.trim()) return;
-        item.text = text.trim();
-        saveAnnouncements();
+        const body = prompt("Edit announcement:", item.body);
+        if (body === null || !body.trim()) return;
+        const response = await Auth.request(`/api/announcements/${item.id}`, {
+            method: "PATCH",
+            body: { body: body.trim() }
+        });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not update announcement.", "danger");
+            return;
+        }
+        await loadAnnouncements(false);
+        toast("Announcement updated", "success");
     } else if (remove) {
-        announcements = announcements.filter((a) => a.id !== Number(remove.dataset.announcementDelete));
-        saveAnnouncements();
+        const id = Number(remove.dataset.announcementDelete);
+        if (!confirm("Delete this announcement?")) return;
+        const response = await Auth.request(`/api/announcements/${id}`, { method: "DELETE" });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not delete announcement.", "danger");
+            return;
+        }
+        await loadAnnouncements(false);
+        toast("Announcement deleted", "info");
     }
 });
 
-function postAnnouncement() {
+async function postAnnouncement() {
     const input = $("#announcement-text");
     const text = input.value.trim();
     if (!text) {
@@ -905,8 +980,20 @@ function postAnnouncement() {
         toast("Type an announcement first", "danger");
         return;
     }
-    announcements.unshift({ id: Date.now(), type: $("#announcement-type").value, text, createdAt: new Date().toISOString() });
-    saveAnnouncements();
+    const type = $("#announcement-type").value;
+    const response = await Auth.request("/api/announcements", {
+        method: "POST",
+        body: {
+            title: type === "maintenance" ? "Scheduled maintenance" : "Weather advisory",
+            body: text,
+            type
+        }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not post announcement.", "danger");
+        return;
+    }
+    await loadAnnouncements(false);
     $$(".announcement").forEach((banner) => {
         banner.classList.remove("ping");
         void banner.offsetWidth;
@@ -919,30 +1006,82 @@ function postAnnouncement() {
 renderAnnouncements();
 $("#post-announcement").addEventListener("click", postAnnouncement);
 $("#announcement-text").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") postAnnouncement();
+    if (e.key === "Enter") void postAnnouncement();
 });
 
 function renderAreaAdmin() {
     $("#area-admin-list").innerHTML = Object.entries(BARANGAYS).map(([name, area]) => `
         <div class="admin-list-row">
-            <span><strong>${esc(name)}</strong><small>Feeder ${area.feeder + 1} · ${area.coords.map((n) => Number(n).toFixed(4)).join(", ")}</small></span>
-            <button type="button" class="back-button" data-area-edit="${esc(name)}">Edit</button>
-            <button type="button" class="back-button" data-area-delete="${esc(name)}">Remove</button>
+            <span><strong>${esc(name)}</strong><small>${esc(area.feederName || `Feeder ${area.feeder + 1}`)} · approximate marker${area.boundaryAvailable ? " · sample boundary (not verified)" : " · no boundary data"}</small></span>
+            <button type="button" class="back-button" data-area-edit="${Number(area.id) || ""}" ${area.id ? "" : "disabled"}>Edit</button>
+            <button type="button" class="back-button" data-area-delete="${Number(area.id) || ""}" ${area.id ? "" : "disabled"}>Remove</button>
         </div>`).join("");
 }
 
-function saveAreas() {
-    localStorage.setItem("powergrid_areas", JSON.stringify(Object.entries(BARANGAYS).map(([name, area]) => ({
-        name, coords: area.coords, feeder: area.feeder
-    }))));
+function renderFeederOptions() {
+    const select = $("#area-feeder");
+    const current = select.value;
+    select.innerHTML = feederRecords.map((feeder) =>
+        `<option value="${Number(feeder.id)}">${esc(feeder.name)}</option>`
+    ).join("");
+    if (feederRecords.some((feeder) => String(feeder.id) === current)) select.value = current;
 }
 
-$("#area-form").addEventListener("submit", (e) => {
+async function loadBarangays(showError = true) {
+    try {
+        const [areaResponse, feederResponse] = await Promise.all([
+            Auth.request("/api/barangays"),
+            Auth.request("/api/barangays/feeders")
+        ]);
+        if (areaResponse.status < 200 || areaResponse.status >= 300 ||
+            !areaResponse.data.ok || !Array.isArray(areaResponse.data.barangays)) {
+            throw new Error(areaResponse.data.error || "Could not load barangays.");
+        }
+        if (feederResponse.status < 200 || feederResponse.status >= 300 ||
+            !feederResponse.data.ok || !Array.isArray(feederResponse.data.feeders)) {
+            throw new Error(feederResponse.data.error || "Could not load feeders.");
+        }
+        feederRecords.splice(0, feederRecords.length, ...feederResponse.data.feeders);
+        Object.keys(BARANGAYS).forEach((name) => delete BARANGAYS[name]);
+        areaResponse.data.barangays.forEach((area) => {
+            const feederIndex = feederRecords.findIndex((feeder) => Number(feeder.id) === Number(area.feeder_id));
+            const fallbackCoords = [13.7567, 121.0583];
+            BARANGAYS[area.name] = {
+                id: Number(area.id),
+                coords: Number.isFinite(area.latitude) && Number.isFinite(area.longitude)
+                    ? [area.latitude, area.longitude]
+                    : fallbackCoords,
+                feeder: Math.max(0, Math.min(2, feederIndex)),
+                feederId: Number(area.feeder_id),
+                feederName: area.feeder_name || feederRecords[feederIndex]?.name,
+                boundaryAvailable: area.boundary_available,
+                householdsEstimate: Number(area.households_estimate) || 1000
+            };
+        });
+        renderFeederOptions();
+        if (!Object.keys(BARANGAYS).length) throw new Error("No barangays are configured.");
+        defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
+        if (!BARANGAYS[report.barangay]) {
+            report.barangay = defaultBarangay;
+        }
+        report.coords = [...BARANGAYS[report.barangay].coords];
+        renderBarangayOptions();
+        renderAreaAdmin();
+        renderAll();
+        updateSmsLink();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load barangays.", "danger");
+        return false;
+    }
+}
+
+$("#area-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("#area-name").value.trim();
     const lat = Number($("#area-lat").value);
     const lng = Number($("#area-lng").value);
-    if (!name || BARANGAYS[name] || Object.keys(BARANGAYS).some((area) => area.toLowerCase() === name.toLowerCase())) {
+    if (!name || Object.keys(BARANGAYS).some((area) => area.toLowerCase() === name.toLowerCase())) {
         toast("Enter a new, unique barangay name", "danger");
         return;
     }
@@ -953,49 +1092,71 @@ $("#area-form").addEventListener("submit", (e) => {
         return;
     }
     const coords = hasLat ? [lat, lng] : [13.7567, 121.0583];
-    if (!coords.every(Number.isFinite) || (hasLat && (lat < 13.65 || lat > 13.84 || lng < 120.96 || lng > 121.16))) {
+    const feederId = Number($("#area-feeder").value);
+    if (!coords.every(Number.isFinite) || (hasLat && (lat < 13.65 || lat > 13.84 || lng < 120.96 || lng > 121.16)) ||
+        !feederRecords.some((feeder) => Number(feeder.id) === feederId)) {
         toast("Use coordinates inside Batangas City", "danger");
         return;
     }
-    BARANGAYS[name] = { coords, feeder: Number($("#area-feeder").value) };
-    saveAreas();
+    const response = await Auth.request("/api/barangays", {
+        method: "POST",
+        body: { name, latitude: coords[0], longitude: coords[1], feeder_id: feederId }
+    });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not add barangay.", "danger");
+        return;
+    }
     $("#area-form").reset();
-    renderBarangayOptions();
-    renderAreaAdmin();
-    renderAll();
+    await loadBarangays(false);
     toast(`${name} added`, "success");
 });
 
-$("#area-admin-list").addEventListener("click", (e) => {
+$("#area-admin-list").addEventListener("click", async (e) => {
     const edit = e.target.closest("[data-area-edit]");
     const button = e.target.closest("[data-area-delete]");
     if (edit) {
-        const area = BARANGAYS[edit.dataset.areaEdit];
-        if (!area) return;
+        const id = Number(edit.dataset.areaEdit);
+        const entry = Object.entries(BARANGAYS).find(([, area]) => area.id === id);
+        if (!entry) return;
+        const [name, area] = entry;
         const latText = prompt("Latitude:", String(area.coords[0]));
         if (latText === null) return;
         const lngText = prompt("Longitude:", String(area.coords[1]));
         if (lngText === null) return;
-        const feederText = prompt("Feeder number (1–3):", String(area.feeder + 1));
+        const feederNumber = feederRecords.findIndex((feeder) => Number(feeder.id) === area.feederId) + 1;
+        const feederText = prompt(`Feeder number (1–${feederRecords.length}):`, String(feederNumber));
         if (feederText === null) return;
         const lat = Number(latText);
         const lng = Number(lngText);
-        const feederNumber = Number(feederText);
+        const nextFeederIndex = Number(feederText) - 1;
         if (!Number.isFinite(lat) || lat < 13.65 || lat > 13.84 || !Number.isFinite(lng) || lng < 120.96 || lng > 121.16 ||
-            !Number.isInteger(feederNumber) || feederNumber < 1 || feederNumber > 3) {
-            toast("Use valid Batangas City coordinates and feeder 1–3", "danger");
+            !Number.isInteger(nextFeederIndex) || !feederRecords[nextFeederIndex]) {
+            toast("Use valid Batangas City coordinates and feeder number", "danger");
             return;
         }
-        area.coords = [lat, lng];
-        area.feeder = feederNumber - 1;
-        saveAreas();
-        renderAreaAdmin();
-        renderAll();
-        toast(`${edit.dataset.areaEdit} updated`, "success");
+        const response = await Auth.request(`/api/barangays/${id}`, {
+            method: "PATCH",
+            body: {
+                name,
+                latitude: lat,
+                longitude: lng,
+                feeder_id: Number(feederRecords[nextFeederIndex].id),
+                households_estimate: area.householdsEstimate
+            }
+        });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not update barangay.", "danger");
+            return;
+        }
+        await loadBarangays(false);
+        toast(`${name} updated`, "success");
         return;
     }
     if (!button) return;
-    const name = button.dataset.areaDelete;
+    const id = Number(button.dataset.areaDelete);
+    const entry = Object.entries(BARANGAYS).find(([, area]) => area.id === id);
+    if (!entry) return;
+    const [name] = entry;
     if (outages.some((o) => o.barangay === name)) {
         toast("This area has outage history and cannot be removed", "danger");
         return;
@@ -1005,74 +1166,81 @@ $("#area-admin-list").addEventListener("click", (e) => {
         return;
     }
     if (!confirm(`Remove ${name} from the demo area list?`)) return;
-    delete BARANGAYS[name];
-    saveAreas();
-    renderBarangayOptions();
-    renderAreaAdmin();
-    renderAll();
+    const response = await Auth.request(`/api/barangays/${id}`, { method: "DELETE" });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not remove barangay.", "danger");
+        return;
+    }
+    await loadBarangays(false);
     toast(`${name} removed`, "info");
 });
 
+let managedUsers = [];
+
 function renderUserAdmin() {
-    let users = [];
-    try {
-        users = JSON.parse(localStorage.getItem("powergrid_users")) || [];
-    } catch {
-        users = [];
-    }
-    const allUsers = [Auth.DEMO_ADMIN, ...users];
-    $("#user-admin-list").innerHTML = allUsers.map((account) => `
+    $("#user-admin-list").innerHTML = managedUsers.map((account) => `
         <div class="admin-list-row">
-            <span><strong>${esc(account.name)}</strong><small>${esc(account.email)} · ${account.role === "admin" ? "Staff" : "Resident"}</small></span>
-            ${account.email === Auth.DEMO_ADMIN.email ? '<small>Demo admin</small>' :
-                `<button type="button" class="back-button" data-user-edit="${esc(account.email)}">Edit</button>
-                <button type="button" class="back-button" data-user-role="${esc(account.email)}">${account.role === "admin" ? "Make resident" : "Make staff"}</button>
-                <button type="button" class="back-button" data-user-delete="${esc(account.email)}">Delete</button>`}
+            <span><strong>${esc(account.name)}${String(account.id) === String(user.id) ? " (you)" : ""}</strong><small>${esc(account.email)} · ${account.role === "admin" ? "Staff" : "Resident"}${account.barangay ? ` · ${esc(account.barangay)}` : ""}${account.is_active ? "" : " · Deactivated"}</small></span>
+            ${String(account.id) === String(user.id) ? '<small>Current account</small>' :
+                `<button type="button" class="back-button" data-user-edit="${Number(account.id)}">Edit</button>
+                <button type="button" class="back-button" data-user-role="${Number(account.id)}">${account.role === "admin" ? "Make resident" : "Make staff"}</button>
+                <button type="button" class="back-button" data-user-active="${Number(account.id)}">${account.is_active ? "Deactivate" : "Reactivate"}</button>`}
         </div>`).join("") || '<p class="feedback-empty">No registered users.</p>';
 }
 
-$("#user-admin-list").addEventListener("click", (e) => {
+async function loadUsers(showError = true) {
+    try {
+        const response = await Auth.request("/api/users");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.users)) {
+            throw new Error(response.data.error || "Could not load user accounts.");
+        }
+        managedUsers = response.data.users;
+        renderUserAdmin();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load user accounts.", "danger");
+        return false;
+    }
+}
+
+$("#user-admin-list").addEventListener("click", async (e) => {
     const editButton = e.target.closest("[data-user-edit]");
     const roleButton = e.target.closest("[data-user-role]");
-    const deleteButton = e.target.closest("[data-user-delete]");
-    let users;
-    try {
-        users = JSON.parse(localStorage.getItem("powergrid_users")) || [];
-    } catch {
-        users = [];
-    }
-    const email = editButton ? editButton.dataset.userEdit : roleButton ? roleButton.dataset.userRole : deleteButton && deleteButton.dataset.userDelete;
-    const account = users.find((item) => item.email === email);
+    const activeButton = e.target.closest("[data-user-active]");
+    const id = Number(editButton ? editButton.dataset.userEdit :
+        roleButton ? roleButton.dataset.userRole : activeButton && activeButton.dataset.userActive);
+    const account = managedUsers.find((item) => Number(item.id) === id);
     if (!account) return;
-    if (email === user.email) {
-        toast("You cannot edit or remove your own account", "danger");
-        return;
-    }
+    let changes;
     if (editButton) {
         const name = prompt("User name:", account.name);
         if (name === null) return;
         const nextEmail = prompt("Email:", account.email);
         if (nextEmail === null) return;
         const normalizedEmail = nextEmail.trim().toLowerCase();
-        if (!name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
-            users.some((item) => item !== account && item.email.toLowerCase() === normalizedEmail)) {
-            toast("Enter a name and a unique valid email", "danger");
+        if (!name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+            toast("Enter a name and a valid email address", "danger");
             return;
         }
-        account.name = name.trim();
-        account.email = normalizedEmail;
+        changes = { name: name.trim(), email: normalizedEmail };
     } else if (roleButton) {
-        account.role = account.role === "admin" ? "resident" : "admin";
-    } else if (deleteButton) {
-        if (email === user.email || !confirm(`Delete account ${email}?`)) return;
-        users = users.filter((item) => item.email !== email);
+        changes = { role: account.role === "admin" ? "resident" : "admin" };
+    } else if (activeButton) {
+        const action = account.is_active ? "Deactivate" : "Reactivate";
+        if (!confirm(`${action} account ${account.email}?`)) return;
+        changes = { is_active: !account.is_active };
     }
-    localStorage.setItem("powergrid_users", JSON.stringify(users));
-    renderUserAdmin();
+    const response = await Auth.request(`/api/users/${id}`, { method: "PATCH", body: changes });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not update user account.", "danger");
+        return;
+    }
+    await loadUsers(false);
+    toast("User account updated", "success");
 });
 
 /* ---------- report wizard ---------- */
-const defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
+let defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
 const report = {
     step: 1,
     barangay: defaultBarangay,
@@ -1087,9 +1255,11 @@ const report = {
     photo: null,
     photoLoading: false
 };
+let submittingReport = false;
 
 function renderBarangayOptions() {
     if (!BARANGAYS[report.barangay]) {
+        defaultBarangay = BARANGAYS[user.barangay] ? user.barangay : Object.keys(BARANGAYS)[0];
         report.barangay = defaultBarangay;
         report.coords = [...BARANGAYS[defaultBarangay].coords];
     }
@@ -1168,48 +1338,60 @@ function goToStep(target) {
     setStep(target);
 }
 
-function submitReport() {
+async function submitReport() {
+    if (submittingReport) return;
     if (report.photoLoading) {
         toast("Wait for the selected photo to finish processing", "info");
         return;
     }
-    const normalizedAddress = report.landmark.trim().toLowerCase().replace(/\s+/g, " ");
-    const duplicate = outages.find((o) => {
-        if (o.barangay !== report.barangay || o.status === "restored") return false;
-        const sameAddress = o.address.trim().toLowerCase().replace(/\s+/g, " ") === normalizedAddress;
-        const distance = report.pinSelected && map ? map.distance(o.coords, report.coords) : Infinity;
-        return sameAddress || distance <= 150;
-    });
-
-    if (duplicate) {
-        duplicate.households += clampHouseholds($("#households").value);
-        duplicate.reportCount = (duplicate.reportCount || 1) + 1;
-        duplicate.notes = [duplicate.notes, report.notes.trim()].filter(Boolean).join(" · ");
-        if (report.photo) duplicate.photo = report.photo;
-        duplicate.eta = estimateRestoration(duplicate);
-        toast(`Added to outage #${duplicate.id}; ${duplicate.reportCount} similar reports grouped`, "success");
-        resetReport();
-        renderAll();
-        showOnMap(duplicate.id);
-        return;
+    const hasPhoto = Boolean(report.photo);
+    const barangay = report.barangay;
+    const body = {
+        barangay: report.barangay,
+        landmark: report.landmark.trim(),
+        cause: report.cause,
+        latitude: report.coords[0],
+        longitude: report.coords[1],
+        households: clampHouseholds($("#households").value),
+        notes: report.notes.trim()
+    };
+    if (report.startedAt) {
+        const startedAt = new Date(report.startedAt);
+        if (Number.isNaN(startedAt.getTime())) {
+            toast("Choose a valid outage start time.", "danger");
+            return;
+        }
+        body.started_at = startedAt.toISOString();
     }
 
-    const outage = addOutage({
-        barangay: report.barangay,
-        address: report.landmark.trim(),
-        households: clampHouseholds($("#households").value),
-        cause: report.cause,
-        since: report.when,
-        startedAt: report.startedAt || null,
-        coords: [...report.coords],
-        notes: report.notes.trim(),
-        photo: report.photo,
-        reporter: user.name
-    });
-    toast(`Report #${outage.id} saved for ${outage.barangay}`, "success");
-    resetReport();
-    renderAll();
-    showOnMap(outage.id);
+    submittingReport = true;
+    $("#report-next").disabled = true;
+    try {
+        let requestBody = body;
+        if (report.photo) {
+            const photoResponse = await fetch(report.photo);
+            if (!photoResponse.ok) throw new Error("Could not prepare the selected photo for upload.");
+            const formData = new FormData();
+            Object.entries(body).forEach(([key, value]) => formData.append(key, String(value)));
+            formData.append("photo", await photoResponse.blob(), "outage-report.jpg");
+            requestBody = formData;
+        }
+        const response = await Auth.request("/api/incidents/reports", { method: "POST", body: requestBody });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            const fieldErrors = response.data.errors ? Object.values(response.data.errors).join(" ") : "";
+            throw new Error(fieldErrors || response.data.error || "Could not submit outage report.");
+        }
+        const incidentId = Number(response.data.incident_id);
+        resetReport();
+        toast(`Report #${incidentId} saved for ${barangay}${hasPhoto ? " with photo" : ""}`, "success");
+        if (await loadIncidents(false)) showOnMap(incidentId);
+        else toast("The report was saved, but the outage list could not be refreshed.", "danger");
+    } catch (error) {
+        toast(error.message || "Could not submit outage report.", "danger");
+    } finally {
+        submittingReport = false;
+        $("#report-next").disabled = false;
+    }
 }
 
 function markDefaultBarangay() {
@@ -1386,6 +1568,7 @@ $("#report-next").addEventListener("click", () => {
 function renderFeedback() {
     const list = $("#feedback-list");
     if (!list) return;
+    $("#feedback-clear").hidden = !isStaff;
     if (!feedback.length) {
         list.innerHTML = '<p class="feedback-empty">No whereabouts reports yet.</p>';
         return;
@@ -1395,17 +1578,29 @@ function renderFeedback() {
         <article class="feedback-item">
             <div class="feedback-item-header">
                 <strong>${esc(item.barangay)} · ${esc(item.location)}</strong>
-                <time>${esc(item.time)}</time>
+                <time>${esc(item.pending ? "Pending sync" : new Date(item.created_at || item.time).toLocaleString())}</time>
             </div>
             <p>${esc(item.comment)}</p>
         </article>
     `).join("");
 }
 
-renderBarangayOptions();
-$("#feedback-barangay").value = defaultBarangay;
+async function loadFeedback(showError = true) {
+    try {
+        const response = await Auth.request("/api/feedback");
+        if (response.status < 200 || response.status >= 300 || !response.data.ok || !Array.isArray(response.data.feedback)) {
+            throw new Error(response.data.error || "Could not load community feedback.");
+        }
+        feedback = response.data.feedback.concat(pendingFeedback.map((item) => ({ ...item, pending: true })));
+        renderFeedback();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load community feedback.", "danger");
+        return false;
+    }
+}
 
-$("#feedback-form").addEventListener("submit", (e) => {
+$("#feedback-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const barangay = $("#feedback-barangay").value;
     const location = $("#feedback-location").value.trim();
@@ -1418,36 +1613,48 @@ $("#feedback-form").addEventListener("submit", (e) => {
         return;
     }
 
-    feedback.unshift({
-        barangay,
-        location,
-        comment,
-        time: new Date().toLocaleString(),
-        author: user.name
-    });
-    pendingFeedback.unshift(feedback[0]);
-    try {
-        localStorage.setItem(FEEDBACK_KEY, JSON.stringify(feedback));
-        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
-    } catch {
-        toast("Feedback could not be saved in this browser", "danger");
-        return;
+    const body = { barangay, location, comment };
+    if (!navigator.onLine) {
+        pendingFeedback.unshift({ ...body, time: new Date().toLocaleString() });
+        feedback.unshift({ ...pendingFeedback[0], pending: true });
+        toast(`Feedback queued offline for ${barangay}`, "info");
+    } else {
+        const response = await Auth.request("/api/feedback", { method: "POST", body });
+        if (response.status === 0) {
+            pendingFeedback.unshift({ ...body, time: new Date().toLocaleString() });
+            feedback.unshift({ ...pendingFeedback[0], pending: true });
+            toast(`Feedback queued offline for ${barangay}`, "info");
+        } else if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            toast(response.data.error || "Could not post feedback.", "danger");
+            return;
+        } else {
+            await loadFeedback(false);
+            toast(`Feedback saved for ${barangay}`, "success");
+        }
     }
 
+    try {
+        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    } catch {
+        toast("Feedback is visible now but could not be saved for offline sync.", "danger");
+        return;
+    }
     $("#feedback-location").value = "";
     $("#feedback-comment").value = "";
     renderFeedback();
     updateSmsLink();
-    toast(navigator.onLine ? `Feedback saved for ${barangay}` : `Feedback saved offline for ${barangay}`, navigator.onLine ? "success" : "info");
 });
 
-$("#feedback-clear").addEventListener("click", () => {
-    if (!feedback.length) return;
-    feedback = [];
+$("#feedback-clear").addEventListener("click", async () => {
+    if (!isStaff || !confirm("Clear all shared community feedback?")) return;
+    const response = await Auth.request("/api/feedback", { method: "DELETE" });
+    if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+        toast(response.data.error || "Could not clear community feedback.", "danger");
+        return;
+    }
     pendingFeedback = [];
-    localStorage.removeItem(FEEDBACK_KEY);
     localStorage.removeItem(FEEDBACK_PENDING_KEY);
-    renderFeedback();
+    await loadFeedback(false);
     toast("All community feedback cleared", "info");
 });
 
@@ -1569,11 +1776,6 @@ function renderAll() {
     renderNetwork();
     renderForecast();
     renderHistory();
-    try {
-        localStorage.setItem("powergrid_live_state", JSON.stringify({ outages, feeders, selectedId }));
-    } catch {
-        // The interface can still run when browser storage is unavailable.
-    }
 }
 
 /* ---------- start ---------- */
@@ -1591,21 +1793,28 @@ function updateConnectivity() {
 
 async function syncPendingFeedback() {
     if (!pendingFeedback.length) return;
+    const previousLength = pendingFeedback.length;
     const unsent = [];
-    for (const item of pendingFeedback) {
-        try {
-            const response = await fetch("./api/feedback", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(item)
-            });
-            if (!response.ok) unsent.push(item);
-        } catch {
-            unsent.push(item);
+    for (const [index, item] of pendingFeedback.entries()) {
+        const response = await Auth.request("/api/feedback", { method: "POST", body: item });
+        if (response.status >= 200 && response.status < 300 && response.data.ok) continue;
+        if (response.status !== 0) {
+            console.error("Could not sync offline feedback:", response.data.error || `HTTP ${response.status}`);
+        } else {
+            unsent.push(...pendingFeedback.slice(index));
+            break;
         }
+        unsent.push(item);
     }
     pendingFeedback = unsent;
-    localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    try {
+        localStorage.setItem(FEEDBACK_PENDING_KEY, JSON.stringify(pendingFeedback));
+    } catch (error) {
+        console.error("Could not persist pending feedback:", error.message);
+    }
+    if (unsent.length < previousLength) {
+        await loadFeedback(false);
+    }
 }
 
 window.addEventListener("online", updateConnectivity);
@@ -1614,13 +1823,22 @@ window.addEventListener("offline", updateConnectivity);
 renderAreaAdmin();
 renderUserAdmin();
 initMap();
-log("Simulated nodes connected over HTTPS and WebSocket");
+log("Browser network simulation ready; MQTT sensor adapter is disabled by default");
 renderAll();
 renderFeedback();
 markDefaultBarangay();
 setStep(1, true);
 syncSliders();
 updateConnectivity();
+loadIncidents();
+loadBarangays();
+loadAnnouncements();
+loadFeedback();
+if (isStaff) loadUsers();
+window.addEventListener("focus", () => loadIncidents(false));
+setInterval(() => {
+    if (document.visibilityState === "visible") loadIncidents(false);
+}, 30000);
 
 // Let the forecast bars grow after first paint
 setTimeout(() => {
@@ -1647,7 +1865,7 @@ document.addEventListener("pointerdown", (e) => {
 $("#logout-button").addEventListener("click", () => {
     document.body.classList.add("signing-out");
     Auth.logout();
-    setTimeout(() => location.replace("Login.html"), 380);
+    setTimeout(() => location.replace(isStaff ? "StaffLogin.html" : "Login.html"), 380);
 });
 
 if (sessionStorage.getItem("pg_welcome")) {

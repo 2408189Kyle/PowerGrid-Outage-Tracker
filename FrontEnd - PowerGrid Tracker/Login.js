@@ -17,18 +17,24 @@ let mode = "login";
 let panelToken = 0;
 
 /* ---------- barangay list + demo account ---------- */
-Auth.getBarangays()
-    .then((names) => names.forEach((name) => {
+function populateBarangays(names) {
+    const select = $("#reg-barangay");
+    const placeholder = select.options[0];
+    select.replaceChildren(placeholder);
+    [...new Set(names)].forEach((name) => {
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
-        $("#reg-barangay").append(option);
-    }))
+        select.append(option);
+    });
+}
+
+populateBarangays(Auth.BARANGAYS);
+Auth.getBarangays()
+    .then(populateBarangays)
     .catch((error) => {
         $("#register-error").textContent = error.message;
     });
-$("#demo-email").textContent = Auth.DEMO_ADMIN.email;
-$("#demo-password").textContent = Auth.DEMO_ADMIN.password;
 
 /* ---------- switching between Log in and Create account ---------- */
 function setMode(next, instant = false) {
@@ -130,20 +136,18 @@ $("#reg-password").addEventListener("input", (e) => {
     $("#strength-label").textContent = labels[level];
 });
 
-/* ---------- demo account helper ---------- */
-$("#demo-fill").addEventListener("click", () => {
-    $("#login-email").value = Auth.DEMO_ADMIN.email;
-    $("#login-password").value = Auth.DEMO_ADMIN.password;
-    $("#login-password").focus();
-});
-
 /* ---------- log in ---------- */
 $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const form = e.currentTarget;
     clearErrors();
     setBusy(form, true);
-    const result = await Auth.login(form.elements.email.value, form.elements.password.value, $("#login-remember").checked);
+    const result = await Auth.login(
+        form.elements.email.value,
+        form.elements.password.value,
+        $("#login-remember").checked,
+        "resident"
+    );
     if (result.ok) {
         goHome();
         return;

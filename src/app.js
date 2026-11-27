@@ -16,6 +16,7 @@ const barangayRoutes = require("./routes/barangays");
 const incidentRoutes = require("./routes/incidents");
 const announcementRoutes = require("./routes/announcements");
 const feedbackRoutes = require("./routes/feedback");
+const userRoutes = require("./routes/users");
 
 const app = express();
 const frontendPath = path.resolve(__dirname, "..", "FrontEnd - PowerGrid Tracker");
@@ -47,6 +48,7 @@ app.use("/api/barangays", barangayRoutes);
 app.use("/api/incidents", incidentRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/feedback", feedbackRoutes);
+app.use("/api/users", userRoutes);
 app.use(express.static(frontendPath));
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API route not found" }));

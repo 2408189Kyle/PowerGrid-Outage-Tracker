@@ -17,7 +17,7 @@
 <body>
     <div class="offline-banner" id="offline-banner" role="status" hidden>
         <span>Offline mode</span>
-        <small>Saved reports stay on this device until a server is available.</small>
+        <small>You are offline. New outage reports require a connection; queued feedback will sync when reconnected.</small>
     </div>
     <!-- Blurred purple glow behind everything -->
     <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -65,7 +65,7 @@
 
             <section class="announcement spot">
                 <span class="speaker">⌁</span>
-                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+                <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
 
             <section class="stats spot">
@@ -156,13 +156,13 @@
 
             <section class="forecast spot">
                 <h3>Outage risk forecast by barangay</h3>
-                <p>Demo estimate based on the outage reports saved in this browser—not an official prediction.</p>
+                <p>Demo estimate based on shared server outage reports—not an official prediction.</p>
                 <div class="forecast-grid" id="forecast-grid"></div>
             </section>
 
             <section class="history-panel spot">
                 <div class="history-heading">
-                    <div><h3>Outage history and monthly summary</h3><p>Summary uses reports stored in this browser.</p></div>
+                    <div><h3>Outage history and monthly summary</h3><p>Summary uses reports stored on the server.</p></div>
                     <label>Month <input id="history-month" type="month"></label>
                 </div>
                 <div id="history-summary" class="history-summary"></div>
@@ -182,7 +182,7 @@
 
             <section class="announcement spot">
                 <span class="speaker">⌁</span>
-                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+                <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
 
             <section class="report-panel spot">
@@ -296,9 +296,9 @@
 
             <section class="announcement spot">
                 <span class="speaker">⌁</span>
-                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+                <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
-            <p class="network-intro">This browser simulates feeder nodes. Switch a feeder to “Cut link” to mark its barangays as brownout areas and create demo reports.</p>
+            <p class="network-intro">Feeder fault controls are simulated in this browser. The MQTT adapter is prepared but disabled until configured with registered sensor nodes; no physical sensors are connected.</p>
 
             <div class="network-layout">
                 <section class="network-board spot">
@@ -353,7 +353,7 @@
                         <div class="protocols">
                             <button type="button" class="proto" data-info="HTTPS carries reports and admin actions securely to the server.">HTTPS</button>
                             <button type="button" class="proto" data-info="WebSocket pushes live outage updates to every open map.">WebSocket</button>
-                            <button type="button" class="proto" data-info="MQTT (simulated) is how feeder nodes would send small heartbeat messages.">MQTT (simulated)</button>
+                            <button type="button" class="proto" data-info="MQTT heartbeats can be enabled in local configuration. No hardware connection is active by default.">MQTT adapter (disabled by default)</button>
                         </div>
                     </section>
                 </aside>
@@ -372,7 +372,7 @@
 
             <section class="announcement spot">
                 <span class="speaker">⌁</span>
-                <p><strong>Announcement:</strong> Sample scheduled maintenance in Alangilan, Saturday 8 AM to 12 PM.</p>
+                <p><strong>Announcement:</strong> No current advisories.</p>
             </section>
             <p class="network-intro">Each report moves left to right as staff work on it. Use the bright purple button to move a card forward, or click a card title to find it on the map.</p>
 
@@ -406,8 +406,7 @@
                 <h3>Post an announcement</h3>
                 <select id="announcement-type" aria-label="Announcement type">
                     <option value="maintenance">Scheduled maintenance</option>
-                    <option value="weather">Weather advisory</option>
-                    <option value="general">General update</option>
+                    <option value="advisory">Weather advisory</option>
                 </select>
                 <input id="announcement-text" type="text" placeholder="Example: Scheduled maintenance on Saturday 8 AM to 12 PM" autocomplete="off">
                 <button class="primary-button" id="post-announcement" type="button">Post announcement</button>
@@ -420,12 +419,10 @@
                     <summary>Manage barangays</summary>
                     <form id="area-form" class="admin-inline-form">
                         <input id="area-name" type="text" placeholder="New barangay name" required>
-                        <input id="area-lat" type="number" step="0.0001" min="13.65" max="13.84" placeholder="Latitude" aria-label="Latitude">
-                        <input id="area-lng" type="number" step="0.0001" min="120.96" max="121.16" placeholder="Longitude" aria-label="Longitude">
+                        <input id="area-lat" type="number" step="0.0001" min="13.65" max="13.84" placeholder="Latitude" aria-label="Latitude" required>
+                        <input id="area-lng" type="number" step="0.0001" min="120.96" max="121.16" placeholder="Longitude" aria-label="Longitude" required>
                         <select id="area-feeder" aria-label="Assign feeder">
-                            <option value="0">Feeder 1</option>
-                            <option value="1">Feeder 2</option>
-                            <option value="2">Feeder 3</option>
+                            <option value="">Loading feeders…</option>
                         </select>
                         <button class="primary-button" type="submit">Add area</button>
                     </form>
@@ -433,7 +430,7 @@
                 </details>
                 <details>
                     <summary>Manage users</summary>
-                    <p class="admin-help">Demo-only account list. User authentication and permissions must be enforced by a backend before deployment.</p>
+                    <p class="admin-help">To add staff, ask them to create an account on the resident sign-up page, then select “Make staff” on their account here. They can sign in at the Staff Portal after promotion. Public sign-up never grants staff access. Account changes are stored in the database; the last active administrator cannot be demoted or disabled.</p>
                     <div id="user-admin-list" class="admin-list"></div>
                 </details>
             </section>

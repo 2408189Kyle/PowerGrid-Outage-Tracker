@@ -16,6 +16,7 @@ CREATE TABLE barangays (
     id serial PRIMARY KEY,
     name text UNIQUE NOT NULL,
     boundary geometry(Geometry, 4326),
+    location geometry(Point, 4326),
     households_estimate int NOT NULL DEFAULT 1000,
     feeder_id int REFERENCES feeders(id)
 );
@@ -92,7 +93,8 @@ CREATE TABLE announcements (
     barangay_id int REFERENCES barangays(id),
     starts_at timestamptz,
     ends_at timestamptz,
-    created_by int REFERENCES users(id)
+    created_by int REFERENCES users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE heartbeats (

@@ -1,12 +1,14 @@
-const CACHE_NAME = "powergrid-v4";
+const CACHE_NAME = "powergrid-v6";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./Login.html",
+  "./StaffLogin.html",
   "./style.css",
   "./Auth.css",
   "./script.js",
   "./Login.js",
+  "./StaffLogin.js",
   "./Auth.js"
 ];
 

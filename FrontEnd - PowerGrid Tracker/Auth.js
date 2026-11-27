@@ -12,14 +12,6 @@ const Auth = (() => {
         "Sta. Rita Karsada"
     ];
 
-    const DEMO_ADMIN = {
-        name: "PowerGrid Staff",
-        email: "staff@powergrid.ph",
-        password: "PowerGrid123",
-        barangay: "Poblacion",
-        role: "admin"
-    };
-
     const readSession = () => {
         try {
             const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
@@ -39,21 +31,32 @@ const Auth = (() => {
     };
 
     const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
-    const OFFLINE = "Cannot reach the login server. Start it with npm run dev.";
+    const OFFLINE = "Cannot reach the login server. Start it with npm run dev, then open http://localhost:3002/Login.html (not Live Server or a local file).";
 
-    const api = async (url, body, token) => {
+    const api = async (url, body, token, method) => {
         const headers = {};
-        if (body !== undefined) headers["Content-Type"] = "application/json";
+        const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+        if (body !== undefined && !isFormData) headers["Content-Type"] = "application/json";
         if (token) headers.Authorization = `Bearer ${token}`;
 
         try {
             const response = await fetch(url, {
-                method: body === undefined ? "GET" : "POST",
+                method: method || (body === undefined ? "GET" : "POST"),
                 headers,
                 credentials: "same-origin",
-                body: body === undefined ? undefined : JSON.stringify(body)
+                body: body === undefined ? undefined : isFormData ? body : JSON.stringify(body)
             });
+            const contentType = response.headers.get("content-type") || "";
+            if (!contentType.includes("application/json")) {
+                return {
+                    status: response.status,
+                    data: { error: OFFLINE }
+                };
+            }
             const data = await response.json().catch(() => ({}));
+            if (response.status === 404) {
+                return { status: response.status, data: { error: OFFLINE } };
+            }
             return { status: response.status, data };
         } catch {
             return { status: 0, data: {} };
@@ -74,7 +77,7 @@ const Auth = (() => {
 
     const getBarangays = async () => {
         const { status, data } = await api("/api/barangays");
-        if (status === 0) throw new Error(OFFLINE);
+        if (status === 0 || status === 404) throw new Error(OFFLINE);
         if (!data.ok || !Array.isArray(data.barangays)) {
             throw new Error(data.error || "Could not load barangays.");
         }
@@ -83,9 +86,33 @@ const Auth = (() => {
 
     return {
         BARANGAYS,
-        DEMO_ADMIN,
         passwordStrength,
         getBarangays,
+
+        request(url, { method = "GET", body } = {}) {
+            const session = readSession();
+            return api(url, body, session ? session.token : null, method);
+        },
+
+        async requestImage(url) {
+            const session = readSession();
+            if (!session) throw new Error("Login required to view report photos.");
+
+            let response;
+            try {
+                response = await fetch(url, {
+                    headers: { Authorization: `Bearer ${session.token}` },
+                    credentials: "same-origin"
+                });
+            } catch {
+                throw new Error(OFFLINE);
+            }
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.error || "Could not load a report photo.");
+            }
+            return URL.createObjectURL(await response.blob());
+        },
 
         currentUser() {
             const session = readSession();
@@ -111,10 +138,11 @@ const Auth = (() => {
             sessionStorage.removeItem(SESSION_KEY);
         },
 
-        async login(email, password, remember = false) {
+        async login(email, password, remember = false, audience = "resident") {
             const { status, data } = await api("/api/auth/login", {
                 email: normalizeEmail(email),
                 password: String(password || ""),
+                audience,
                 remember
             });
             if (status === 0) return { ok: false, error: OFFLINE };
