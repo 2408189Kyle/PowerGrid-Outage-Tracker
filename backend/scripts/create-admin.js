@@ -3,13 +3,13 @@
 require("dotenv").config();
 
 const bcrypt = require("bcryptjs");
-const { pool } = require("../src/config/db");
+const { pool } = require("../config/db");
 
 const [rawEmail, password, name = "PowerGrid Staff"] = process.argv.slice(2);
 
 async function createAdmin() {
     if (!rawEmail || !password) {
-        throw new Error("Usage: node scripts/create-admin.js <email> <password> [name]");
+        throw new Error("Usage: node backend/scripts/create-admin.js <email> <password> [name]");
     }
 
     const email = rawEmail.trim().toLowerCase();

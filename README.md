@@ -13,7 +13,7 @@ Use the Express server for both the frontend and API; VS Code Live Server does n
    ```powershell
    docker compose up -d
    ```
-   On a new database volume, Docker initializes the schema and sample data from `migrations/`. For a database volume created before the local-demo integration, apply the new migration once:
+   On a new database volume, Docker initializes the schema and sample data from `database/migrations/`. For a database volume created before the local-demo integration, apply the new migration once:
    ```powershell
    docker compose exec -T db psql -U postgres -d powergrid -f /docker-entrypoint-initdb.d/005_local_demo_integrations.sql
    ```
@@ -38,5 +38,7 @@ Public registration creates resident-only accounts in PostgreSQL. To onboard sta
 Outage reports, announcements, barangay management, user roles/status, and community feedback are stored in PostgreSQL. Report photos are limited to 8 MB and served only to logged-in users. New uploads use the MinIO S3-compatible service by default; the bucket is created on first upload. The MinIO console is at <http://localhost:9001>. Since the original public MinIO image is no longer available without registry access, this local-only setup pins Bitnami's archived MinIO image; it is not supported for production. Local development credentials are defined in `.env.example` and can be overridden in `.env`; do not reuse them outside a local demo. Existing unprefixed photo paths continue to read from the ignored `storage/report-photos/` folder, and `PHOTO_STORAGE=local` is available for disk-only development. Production must use a supported, maintained S3-compatible service with private credentials and persistent storage/backups.
 
 The MQTT adapter is prepared but disabled by default. To enable it locally, set `MQTT_ENABLED=true` and configure `MQTT_URL` and `MQTT_TOPIC_PREFIX` in `.env`. Registered nodes accept heartbeat messages on `powergrid/nodes/<node-name>/heartbeat` with JSON payload `{"seq":42,"latency_ms":18,"packet_loss_pct":0}`. `seq` must be a non-negative integer, latency is limited to 60,000 ms, and packet loss must be between 0 and 100. Unknown nodes and invalid payloads are ignored and logged. Heartbeats update node telemetry only; they do not automatically create outage incidents. The browser's feeder fault controls remain simulated, no physical sensors are connected, and the bundled Mosquitto broker allows anonymous access only for its loopback-bound local demo.
+
+Project files are grouped by role: the browser app is in `frontend/`, the Express API and its admin script are in `backend/`, and SQL migrations are in `database/migrations/`.
 
 Run backend tests with `npm test -- --runInBand`.

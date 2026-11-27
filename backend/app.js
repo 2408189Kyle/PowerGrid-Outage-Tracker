@@ -19,7 +19,7 @@ const feedbackRoutes = require("./routes/feedback");
 const userRoutes = require("./routes/users");
 
 const app = express();
-const frontendPath = path.resolve(__dirname, "..", "public");
+const frontendPath = path.resolve(__dirname, "..", "frontend");
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "10kb" }));
