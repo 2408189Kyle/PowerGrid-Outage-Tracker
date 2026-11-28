@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "build": "node scripts/prepare-vercel.js",
     "dev": "nodemon backend/server.js",
     "start": "node backend/server.js",
     "admin:create": "node backend/scripts/create-admin.js",

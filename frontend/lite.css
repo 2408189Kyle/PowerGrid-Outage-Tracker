@@ -1,0 +1,16 @@
+.panel-actions { align-items: center; }
+.panel-actions .form-message { margin: 0; }
+.offline-map { width: 100%; }
+.offline-map-caption { text-wrap: pretty; }
+.outage-card { min-width: 0; }
+.queue-label { white-space: nowrap; }
+.page-heading p { max-width: 70ch; }
+
+@media (max-width: 700px) {
+    .header-actions { gap: 5px; }
+    .connection { max-width: 100%; }
+    .connection small { display: none; }
+    .panel-actions { align-items: stretch; flex-direction: column; }
+    .panel-actions button { width: 100%; }
+    .panel-actions .form-message { align-self: flex-start; }
+}

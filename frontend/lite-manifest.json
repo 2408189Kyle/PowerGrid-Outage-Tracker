@@ -1,0 +1,11 @@
+{
+  "name": "PowerGrid Lite · Batangas City",
+  "short_name": "PowerGrid Lite",
+  "id": "./lite.html",
+  "start_url": "./lite.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#f4f6f8",
+  "description": "Offline outage snapshots and reporting for Batangas City"
+}

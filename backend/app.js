@@ -14,6 +14,7 @@ const { query } = require("./config/db");
 const authRoutes = require("./routes/auth");
 const barangayRoutes = require("./routes/barangays");
 const incidentRoutes = require("./routes/incidents");
+const networkRoutes = require("./routes/network");
 const announcementRoutes = require("./routes/announcements");
 const feedbackRoutes = require("./routes/feedback");
 const userRoutes = require("./routes/users");
@@ -46,6 +47,7 @@ app.use("/api/auth", rateLimit({
 }), authRoutes);
 app.use("/api/barangays", barangayRoutes);
 app.use("/api/incidents", incidentRoutes);
+app.use("/api/network", networkRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/feedback", feedbackRoutes);
 app.use("/api/users", userRoutes);

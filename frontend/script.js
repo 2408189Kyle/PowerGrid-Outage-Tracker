@@ -98,7 +98,7 @@ const BARANGAYS = {
 };
 const feederRecords = [];
 
-const feeders = [0, 1, 2].map(() => ({ online: true, latency: 18, loss: 0 }));
+const feeders = [0, 1, 2].map(() => ({ id: null, online: true, latency: 18, loss: 0 }));
 const outages = [];
 const reportPhotoUrls = new Map();
 let photoLoadWarningShown = false;
@@ -1227,6 +1227,9 @@ async function loadBarangays(showError = true) {
             throw new Error(feederResponse.data.error || "Could not load feeders.");
         }
         feederRecords.splice(0, feederRecords.length, ...feederResponse.data.feeders);
+        feederRecords.forEach((feeder, index) => {
+            if (feeders[index]) feeders[index].id = Number(feeder.id);
+        });
         Object.keys(BARANGAYS).forEach((name) => delete BARANGAYS[name]);
         areaResponse.data.barangays.forEach((area) => {
             const feederIndex = feederRecords.findIndex((feeder) => Number(feeder.id) === Number(area.feeder_id));
@@ -1249,6 +1252,7 @@ async function loadBarangays(showError = true) {
         if (!BARANGAYS[report.barangay]) {
             report.barangay = defaultBarangay;
         }
+
         report.coords = [...BARANGAYS[report.barangay].coords];
         renderBarangayOptions();
         renderAreaAdmin();
@@ -1257,6 +1261,43 @@ async function loadBarangays(showError = true) {
         return true;
     } catch (error) {
         if (showError) toast(error.message || "Could not load barangays.", "danger");
+        return false;
+    }
+}
+
+async function loadNetworkFeeders(showError = true) {
+    try {
+        const response = await Auth.request("/api/network/feeders");
+        if (response.status < 200 || response.status >= 300 ||
+            !response.data.ok || !Array.isArray(response.data.feeders)) {
+            throw new Error(response.data.error || "Could not load feeder status.");
+        }
+
+        const current = new Map(feeders.map((feeder) => [String(feeder.id), feeder]));
+        const updated = response.data.feeders.map((record) => {
+            if (!Number.isInteger(Number(record.id)) || typeof record.online !== "boolean") {
+                throw new Error("The server returned an invalid feeder status.");
+            }
+            const previous = current.get(String(record.id));
+            const wasOnline = previous ? previous.online : true;
+            return {
+                id: Number(record.id),
+                online: record.online,
+                latency: record.online && !wasOnline ? 18 : previous ? previous.latency : 18,
+                loss: record.online ? (previous && wasOnline ? previous.loss : 0) : 100
+            };
+        });
+        if (updated.length !== feeders.length) {
+            throw new Error("The server feeder list does not match the network monitor.");
+        }
+        feeders.splice(0, feeders.length, ...updated);
+        renderStats();
+        renderAreaStatus();
+        if (isStaff) renderNetwork();
+        return true;
+    } catch (error) {
+        if (showError) toast(error.message || "Could not load feeder status.", "danger");
+        else console.error("Could not refresh feeder status:", error.message);
         return false;
     }
 }
@@ -2088,49 +2129,57 @@ function renderNetwork() {
     substation.classList.toggle("warn", online < feeders.length);
 }
 
-function toggleFeeder(i) {
+async function toggleFeeder(i) {
     if (!isStaff) return;
     const feeder = feeders[i];
-    feeder.online = !feeder.online;
-    const affected = Object.keys(BARANGAYS).filter((name) => BARANGAYS[name].feeder === i);
-
-    if (!feeder.online) {
-        feeder.loss = 100;
-        log(`Feeder ${i + 1} link cut. ${affected.join(" and ")} lost power.`, "bad");
-        const created = [];
-        affected.forEach((name) => {
-            const hasActive = outages.some((o) => o.barangay === name && o.status !== "restored");
-            if (!hasActive) {
-                created.push(
-                    addOutage({
-                        barangay: name,
-                        address: "Detected by network monitor",
-                        households: 25 + Math.floor(Math.random() * 40),
-                        auto: i,
-                        cause: "Feeder link down"
-                    })
-                );
-            }
-        });
-        if (created.length) log(`Auto-created report ${created.map((o) => "#" + o.id).join(", ")} on the Admin Board.`);
-        toast(`Feeder ${i + 1} is down. ${affected.length} barangays have no power.`, "danger");
-    } else {
-        feeder.latency = 18;
-        feeder.loss = 0;
-        log(`Feeder ${i + 1} link restored.`, "good");
-        const fixed = outages.filter((o) => o.auto === i && o.status !== "restored");
-        fixed.forEach((o) => {
-            o.status = "restored";
-            o.eta = estimateRestoration(o);
-        });
-        if (fixed.length) log(`Marked ${fixed.map((o) => "#" + o.id).join(", ")} as restored.`, "good");
-        toast(`Feeder ${i + 1} is back online`, "success");
+    if (!feeder || !feeder.id) {
+        toast("Feeder status is not ready. Refresh and try again.", "danger");
+        return;
     }
-    renderAll();
+
+    const button = $$(".cut-button")[i];
+    if (button) button.disabled = true;
+    const online = !feeder.online;
+    try {
+        const response = await Auth.request(`/api/network/feeders/${feeder.id}`, {
+            method: "PATCH",
+            body: { online }
+        });
+        if (response.status < 200 || response.status >= 300 || !response.data.ok) {
+            throw new Error(response.data.error || "Could not update feeder status.");
+        }
+
+        feeder.online = response.data.feeder.online;
+        feeder.loss = feeder.online ? 0 : 100;
+        if (feeder.online) feeder.latency = 18;
+        const incidentsLoaded = await loadIncidents(false);
+        renderAll();
+        if (!incidentsLoaded) {
+            toast("Feeder status was saved, but the outage list could not be refreshed.", "danger");
+            return;
+        }
+        const areas = response.data.affected_barangays.join(" and ");
+        log(
+            feeder.online
+                ? `Feeder ${i + 1} simulation restored for ${areas}.`
+                : `Feeder ${i + 1} simulation cut. ${areas} marked as brownout.`,
+            feeder.online ? "good" : "bad"
+        );
+        toast(
+            feeder.online
+                ? `Feeder ${i + 1} is back online`
+                : `Feeder ${i + 1} is down. ${response.data.affected_barangays.length} barangays have no power.`,
+            feeder.online ? "success" : "danger"
+        );
+    } catch (error) {
+        toast(error.message || "Could not update feeder status.", "danger");
+    } finally {
+        if (button) button.disabled = false;
+    }
 }
 
 if (isStaff) {
-    $$(".cut-button").forEach((button, i) => button.addEventListener("click", () => toggleFeeder(i)));
+    $$(".cut-button").forEach((button, i) => button.addEventListener("click", () => void toggleFeeder(i)));
 
     $(".network-barangays").addEventListener("click", (e) => {
         const button = e.target.closest(".net-brgy");
@@ -2329,13 +2378,20 @@ renderPendingReports().catch((error) => {
 updateConnectivity();
 loadIncidents();
 loadBarangays();
+loadNetworkFeeders();
 loadAnnouncements();
 loadFeedback();
 if (isStaff) loadUsers();
-window.addEventListener("focus", () => loadIncidents(false));
+window.addEventListener("focus", () => {
+    void loadIncidents(false);
+    void loadNetworkFeeders(false);
+});
 setInterval(() => {
     if (document.visibilityState === "visible") loadIncidents(false);
 }, 30000);
+setInterval(() => {
+    if (document.visibilityState === "visible") loadNetworkFeeders(false);
+}, 10000);
 
 setTimeout(() => {
     $$(".risk").forEach((card) => {

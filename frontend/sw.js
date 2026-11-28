@@ -1,10 +1,13 @@
-const CACHE_NAME = "powergrid-v9";
+const CACHE_NAME = "powergrid-v10";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./Login.html",
   "./StaffLogin.html",
   "./lite.html",
+  "./lite-manifest.json",
+  "./lite.css",
+  "./lite.js",
   "./manifest.json",
   "./style.css",
   "./Auth.css",
