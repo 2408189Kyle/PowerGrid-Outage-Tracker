@@ -111,6 +111,27 @@ function setBusy(form, busy) {
     button.textContent = busy ? "Please wait…" : form.id === "login-form" ? "Log in" : "Create account";
 }
 
+async function checkLoginConnectivity() {
+    const notice = $("#login-offline-note");
+    if (!navigator.onLine) {
+        notice.hidden = false;
+        return false;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+        const response = await fetch("./health", { cache: "no-store", signal: controller.signal });
+        notice.hidden = response.ok;
+        return response.ok;
+    } catch {
+        notice.hidden = false;
+        return false;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 function goHome() {
     sessionStorage.setItem("pg_welcome", "1");
     $("#auth-card").classList.add("leaving");
@@ -154,6 +175,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     }
     setBusy(form, false);
     $("#login-error").textContent = result.error;
+    checkLoginConnectivity();
 });
 
 /* ---------- register ---------- */
@@ -176,6 +198,7 @@ $("#register-form").addEventListener("submit", async (e) => {
     setBusy(form, false);
     showFieldErrors(form, result.errors);
     $("#register-error").textContent = "Please fix the highlighted fields.";
+    checkLoginConnectivity();
 });
 
 /* ---------- start ---------- */
@@ -183,6 +206,16 @@ setMode(location.hash === "#register" ? "register" : "login", true);
 
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-        navigator.serviceWorker.register("./sw.js").catch(() => {});
+        navigator.serviceWorker.register("./sw.js").catch((error) => {
+            console.error("Could not register the offline app shell:", error);
+        });
     });
 }
+
+window.addEventListener("online", checkLoginConnectivity);
+window.addEventListener("offline", checkLoginConnectivity);
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") checkLoginConnectivity();
+});
+window.setInterval(checkLoginConnectivity, 30000);
+checkLoginConnectivity();

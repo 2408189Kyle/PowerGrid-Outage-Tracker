@@ -24,6 +24,11 @@
                 </div>
             </header>
             <p class="auth-sub" id="auth-sub">Log in to report outages and follow repairs in your barangay.</p>
+            <div class="login-offline-note" id="login-offline-note" role="status" aria-live="polite" hidden>
+                <strong>Connection unavailable</strong>
+                <span>Login needs a connection. You can still open Lite to view information saved on this device.</span>
+                <a href="lite.html">Open PowerGrid Lite</a>
+            </div>
 
             <div class="auth-tabs" role="tablist">
                 <button class="auth-tab active" type="button" role="tab" data-mode="login">Log in</button>
@@ -91,6 +96,7 @@
                 <button class="primary-button auth-submit" type="submit">Create account</button>
             </form>
 
+            <p class="lite-entry">Need the lighter version? <a href="lite.html">Open PowerGrid Lite</a></p>
             <p class="auth-note">Accounts are managed by the PowerGrid server.</p>
             <p class="auth-footer">PowerGrid staff? <a href="StaffLogin.html">Staff sign in</a></p>
         </section>

@@ -2173,10 +2173,20 @@ if ("serviceWorker" in navigator) {
     });
 }
 
-function updateConnectivity() {
+let connectivityCheckId = 0;
+let serverReachable = false;
+
+function showConnectivity(available) {
     const banner = $("#offline-banner");
-    if (banner) banner.hidden = navigator.onLine;
-    if (navigator.onLine) {
+    serverReachable = available;
+    if (banner) {
+        banner.hidden = available;
+        $("#offline-banner-title").textContent = navigator.onLine ? "Service unavailable" : "Offline mode";
+        $("#offline-banner-detail").textContent = navigator.onLine
+            ? "The PowerGrid service cannot be reached. Saved information may be out of date."
+            : "You are offline. Saved information may be out of date.";
+    }
+    if (available) {
         syncPendingFeedback();
         syncPendingReports();
     } else {
@@ -2184,6 +2194,28 @@ function updateConnectivity() {
             $("#report-draft-status").textContent = `Could not read saved reports: ${error.message}`;
         });
     }
+}
+
+async function updateConnectivity() {
+    const checkId = ++connectivityCheckId;
+    if (!navigator.onLine) {
+        showConnectivity(false);
+        return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    let available = false;
+    try {
+        const response = await fetch("./health", { cache: "no-store", signal: controller.signal });
+        available = response.ok;
+    } catch {
+        available = false;
+    } finally {
+        clearTimeout(timeout);
+    }
+
+    if (checkId === connectivityCheckId) showConnectivity(available);
 }
 
 async function syncPendingFeedback() {
@@ -2213,7 +2245,7 @@ async function syncPendingFeedback() {
 }
 
 async function syncPendingReports() {
-    if (syncingPendingReports || !navigator.onLine) return;
+    if (syncingPendingReports || !navigator.onLine || !serverReachable) return;
     syncingPendingReports = true;
     let synced = 0;
     try {
@@ -2257,7 +2289,7 @@ async function syncPendingReports() {
     }
 }
 
-$("#sync-pending-reports").addEventListener("click", syncPendingReports);
+$("#sync-pending-reports").addEventListener("click", updateConnectivity);
 $("#pending-report-list").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-remove-report]");
     if (!button || !confirm("Remove this saved outage report from this device? This cannot be undone.")) return;
@@ -2273,6 +2305,10 @@ $("#pending-report-list").addEventListener("click", async (event) => {
 
 window.addEventListener("online", updateConnectivity);
 window.addEventListener("offline", updateConnectivity);
+window.addEventListener("focus", updateConnectivity);
+window.setInterval(() => {
+    if (document.visibilityState === "visible") updateConnectivity();
+}, 30000);
 
 if (isStaff) {
     renderAreaAdmin();

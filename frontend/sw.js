@@ -1,9 +1,11 @@
-const CACHE_NAME = "powergrid-v8";
+const CACHE_NAME = "powergrid-v9";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./Login.html",
   "./StaffLogin.html",
+  "./lite.html",
+  "./manifest.json",
   "./style.css",
   "./Auth.css",
   "./script.js",
@@ -33,6 +35,10 @@ self.addEventListener("fetch", (event) => {
   const requestUrl = new URL(event.request.url);
   if (requestUrl.origin !== self.location.origin) return;
   if (requestUrl.pathname.startsWith("/api/")) return;
+  if (requestUrl.pathname === "/health") {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   event.respondWith(
     fetch(event.request)

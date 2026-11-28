@@ -1547,6 +1547,13 @@ h1 {
 .offline-banner small {
     display: block;
 }
+.offline-banner a {
+    display: inline-block;
+    margin-top: 6px;
+    color: #fff;
+    font-weight: 800;
+    text-decoration: underline;
+}
 .feedback-list-heading {
     margin-top: 14px;
     padding-top: 12px;

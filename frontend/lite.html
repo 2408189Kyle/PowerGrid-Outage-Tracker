@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f6f8">
+    <title>PowerGrid Lite · Batangas City</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --page: #f4f6f8;
+            --surface: #fff;
+            --text: #263445;
+            --muted: #667586;
+            --line: #e1e6eb;
+            --blue: #315f85;
+            --blue-dark: #274c6b;
+            --green: #18794e;
+            --amber: #996000;
+            --red: #b42318;
+            font-family: "Fira Sans", "Segoe UI", Arial, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+        body { margin: 0; min-width: 320px; background: var(--page); color: var(--text); }
+        button, input, select, textarea { font: inherit; }
+        button { cursor: pointer; }
+        button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+            outline: 3px solid #78a9cf;
+            outline-offset: 2px;
+        }
+        .shell { width: min(1120px, 100% - 40px); margin: 0 auto; padding: 22px 0 42px; }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 4px 0 18px;
+        }
+        .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        .brand-mark {
+            display: grid;
+            width: 44px;
+            height: 44px;
+            flex: 0 0 auto;
+            place-items: center;
+            border-radius: 12px;
+            background: var(--blue);
+            color: #fff;
+            font-size: 24px;
+        }
+        .brand h1 { margin: 0; font-size: 20px; letter-spacing: -.3px; }
+        .brand p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+        .connection {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex: 0 0 auto;
+            padding: 9px 12px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--surface);
+            color: var(--text);
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .connection::before { width: 9px; height: 9px; border-radius: 50%; background: var(--green); content: ""; }
+        .connection.offline::before { background: var(--amber); }
+        .connection small { color: var(--muted); font-size: 12px; font-weight: 400; }
+        .offline-note {
+            margin: 0 0 16px;
+            padding: 12px 14px;
+            border: 1px solid #f0d7a6;
+            border-radius: 10px;
+            background: #fff8e8;
+            color: #664500;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .offline-note[hidden] { display: none; }
+        .nav {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 20px;
+            padding: 5px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: var(--surface);
+        }
+        .nav button {
+            min-height: 42px;
+            padding: 9px 16px;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            font-weight: 700;
+        }
+        .nav button[aria-selected="true"] { background: var(--blue); color: #fff; }
+        .page[hidden] { display: none; }
+        .page-heading { margin: 0 0 16px; }
+        .page-heading h2 { margin: 0; font-size: 24px; letter-spacing: -.4px; }
+        .page-heading p { margin: 5px 0 0; color: var(--muted); line-height: 1.5; }
+        .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .stat, .panel, .outage-card {
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: var(--surface);
+        }
+        .stat { min-height: 86px; padding: 15px 16px; }
+        .stat span { display: block; color: var(--muted); font-size: 13px; }
+        .stat strong { display: block; margin-top: 5px; font-size: 23px; }
+        .map-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 16px; }
+        .panel { padding: 18px; }
+        .panel h3 { margin: 0; font-size: 17px; }
+        .panel-intro { margin: 5px 0 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .map-placeholder {
+            display: grid;
+            min-height: 310px;
+            place-items: center;
+            padding: 24px;
+            border: 1px dashed #b9c9d6;
+            border-radius: 9px;
+            background:
+                linear-gradient(30deg, transparent 48%, #dce5eb 49%, #dce5eb 51%, transparent 52%),
+                linear-gradient(145deg, transparent 47%, #dce5eb 48%, #dce5eb 50%, transparent 51%),
+                #f8fafb;
+            text-align: center;
+        }
+        .map-placeholder strong { display: block; margin-bottom: 5px; }
+        .map-placeholder p { max-width: 320px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .outage-list { display: grid; gap: 10px; }
+        .outage-card { padding: 14px; }
+        .outage-card h4 { margin: 0 0 5px; font-size: 15px; }
+        .outage-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+        .outage-status { display: inline-flex; margin-top: 10px; padding: 4px 8px; border-radius: 999px; background: #fff3d6; color: var(--amber); font-size: 12px; font-weight: 700; }
+        .empty-state {
+            padding: 22px 16px;
+            border: 1px dashed #b9c9d6;
+            border-radius: 10px;
+            color: var(--muted);
+            text-align: center;
+            line-height: 1.5;
+        }
+        .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+        .field { display: grid; gap: 7px; }
+        .field.full { grid-column: 1 / -1; }
+        .field label { font-size: 14px; font-weight: 700; }
+        .field input, .field select, .field textarea {
+            width: 100%;
+            min-height: 44px;
+            padding: 10px 12px;
+            border: 1px solid #c5ced8;
+            border-radius: 8px;
+            background: #fff;
+            color: var(--text);
+        }
+        .field textarea { min-height: 96px; resize: vertical; }
+        .field-help { color: var(--muted); font-size: 12px; }
+        .form-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+        .primary-button, .secondary-button {
+            min-height: 44px;
+            padding: 10px 16px;
+            border: 1px solid var(--blue);
+            border-radius: 8px;
+            font-weight: 700;
+        }
+        .primary-button { background: var(--blue); color: #fff; }
+        .primary-button:hover { background: var(--blue-dark); }
+        .secondary-button { background: #fff; color: var(--blue); }
+        .form-message { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .queue-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+        .queue-label {
+            flex: 0 0 auto;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: #fff3d6;
+            color: var(--amber);
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .footer { margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+        @media (max-width: 700px) {
+            .shell { width: min(100% - 28px, 560px); padding: 14px 0 28px; }
+            .header { align-items: flex-start; gap: 10px; padding-bottom: 14px; }
+            .brand { gap: 9px; }
+            .brand-mark { width: 40px; height: 40px; }
+            .brand h1 { font-size: 18px; }
+            .brand p { font-size: 12px; }
+            .connection { gap: 6px; padding: 8px 10px; font-size: 12px; }
+            .connection small { display: none; }
+            .nav { position: sticky; top: 0; z-index: 2; margin: 0 -2px 16px; }
+            .nav button { flex: 1; min-width: 0; padding: 9px 8px; font-size: 14px; }
+            .page-heading h2 { font-size: 21px; }
+            .stats { gap: 8px; }
+            .stat { min-height: 78px; padding: 12px 10px; }
+            .stat span { font-size: 11px; }
+            .stat strong { font-size: 20px; }
+            .map-layout { grid-template-columns: 1fr; gap: 12px; }
+            .panel { padding: 15px; }
+            .map-placeholder { min-height: 220px; }
+            .form-grid { grid-template-columns: 1fr; gap: 14px; }
+            .field.full { grid-column: auto; }
+            .form-actions { align-items: stretch; flex-direction: column; }
+            .form-actions button { width: 100%; }
+            .queue-item { flex-direction: column; gap: 10px; }
+        }
+        @media (max-width: 380px) {
+            .brand p { max-width: 145px; }
+            .stats { grid-template-columns: 1fr; }
+            .stat { min-height: 0; }
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <header class="header">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true">⚡</span>
+                <div>
+                    <h1>PowerGrid Lite</h1>
+                    <p>Outage updates · Batangas City</p>
+                </div>
+            </div>
+            <div class="connection" id="connection-status" role="status" aria-live="polite">
+                <span id="connection-label">Checking connection</span>
+                <small id="connection-detail"></small>
+            </div>
+        </header>
+
+        <p class="offline-note" id="offline-note" role="status" hidden>
+            You’re offline. Outage information may be from your last saved view. New reports can be kept on this device and sent when you reconnect.
+        </p>
+
+        <nav class="nav" role="tablist" aria-label="PowerGrid Lite sections">
+            <button type="button" role="tab" id="tab-outages" aria-controls="page-outages" aria-selected="true">Outages</button>
+            <button type="button" role="tab" id="tab-report" aria-controls="page-report" aria-selected="false">Report</button>
+            <button type="button" role="tab" id="tab-queue" aria-controls="page-queue" aria-selected="false">Queue <span id="queue-count"></span></button>
+        </nav>
+
+        <section class="page" id="page-outages" role="tabpanel" aria-labelledby="tab-outages">
+            <div class="page-heading">
+                <h2>Outage overview</h2>
+                <p>Review saved outage information. It may not include the latest updates while offline.</p>
+            </div>
+            <div class="stats" aria-label="Outage summary">
+                <article class="stat"><span>Active outages</span><strong>—</strong></article>
+                <article class="stat"><span>Households affected</span><strong>—</strong></article>
+                <article class="stat"><span>Last updated</span><strong>—</strong></article>
+            </div>
+            <div class="map-layout">
+                <section class="panel" aria-labelledby="map-title">
+                    <h3 id="map-title">Saved map area</h3>
+                    <p class="panel-intro">The same map area and outage details are available on desktop and mobile.</p>
+                    <div class="map-placeholder">
+                        <div>
+                            <strong>Offline map preview</strong>
+                            <p>A saved map preview will appear here when available. You can still browse outage details below.</p>
+                        </div>
+                    </div>
+                </section>
+                <section class="panel" aria-labelledby="outages-title">
+                    <h3 id="outages-title">Saved outage reports</h3>
+                    <p class="panel-intro">Reports and status updates from your last saved view.</p>
+                    <div class="outage-list" id="outage-list">
+                        <div class="empty-state">No saved outage details are available on this device yet.</div>
+                    </div>
+                </section>
+            </div>
+        </section>
+
+        <section class="page" id="page-report" role="tabpanel" aria-labelledby="tab-report" hidden>
+            <div class="page-heading">
+                <h2>Report a power outage</h2>
+                <p>Fill in what you know. You can add more detail later when it’s safe and convenient.</p>
+            </div>
+            <section class="panel">
+                <form id="report-form">
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="barangay">Barangay</label>
+                            <select id="barangay" name="barangay" required>
+                                <option value="">Choose a barangay</option>
+                                <option>Poblacion</option>
+                                <option>Alangilan</option>
+                                <option>Pallocan West</option>
+                                <option>Kumintang Ibaba</option>
+                                <option>Bolbok</option>
+                                <option>Sta. Rita Karsada</option>
+                                <option>Other / not sure</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="landmark">Street or nearby landmark</label>
+                            <input id="landmark" name="landmark" type="text" placeholder="For example, near the barangay hall">
+                        </div>
+                        <div class="field">
+                            <label for="started-at">When did the outage start?</label>
+                            <select id="started-at" name="started-at">
+                                <option>Just now</option>
+                                <option>About 15 minutes ago</option>
+                                <option>About 1 hour ago</option>
+                                <option>Several hours ago</option>
+                                <option>Not sure</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="households">Households affected (estimate)</label>
+                            <input id="households" name="households" type="number" min="1" inputmode="numeric" placeholder="Optional">
+                        </div>
+                        <div class="field full">
+                            <label for="details">Additional details (optional)</label>
+                            <textarea id="details" name="details" placeholder="Share anything that may help identify the outage."></textarea>
+                        </div>
+                        <div class="field full">
+                            <label for="photo">Photo (optional)</label>
+                            <input id="photo" name="photo" type="file" accept="image/*" capture="environment">
+                            <span class="field-help">Only attach a photo if it is safe to do so.</span>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button class="primary-button" type="submit">Save report to queue</button>
+                        <button class="secondary-button" type="reset">Clear form</button>
+                    </div>
+                    <p class="form-message" id="form-message" role="status" aria-live="polite">
+                        Reports are intended to wait on this device while offline and send after reconnection.
+                    </p>
+                </form>
+            </section>
+        </section>
+
+        <section class="page" id="page-queue" role="tabpanel" aria-labelledby="tab-queue" hidden>
+            <div class="page-heading">
+                <h2>Report queue</h2>
+                <p>See what is waiting to send and whether it has reached the service.</p>
+            </div>
+            <section class="panel">
+                <h3>Waiting to send</h3>
+                <p class="panel-intro">Queued reports remain visible here until they are sent.</p>
+                <div class="empty-state" id="queue-empty">No reports are waiting in the queue.</div>
+                <div class="outage-list" id="queue-list" hidden></div>
+            </section>
+        </section>
+
+        <footer class="footer">
+            For reliable offline access, open this page while connected at least once on this device.
+        </footer>
+    </main>
+
+    <script>
+        const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+        const pages = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+
+        function activateTab(tab) {
+            tabs.forEach((item) => {
+                const active = item === tab;
+                item.setAttribute("aria-selected", String(active));
+                item.tabIndex = active ? 0 : -1;
+            });
+            pages.forEach((page) => {
+                page.hidden = page.id !== tab.getAttribute("aria-controls");
+            });
+        }
+
+        tabs.forEach((tab, index) => {
+            tab.addEventListener("click", () => activateTab(tab));
+            tab.addEventListener("keydown", (event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                const direction = event.key === "ArrowRight" ? 1 : -1;
+                const nextTab = tabs[(index + direction + tabs.length) % tabs.length];
+                activateTab(nextTab);
+                nextTab.focus();
+            });
+        });
+
+        let connectionCheckId = 0;
+
+        function setConnectionStatus(online) {
+            const status = document.getElementById("connection-status");
+            status.classList.toggle("offline", !online);
+            document.getElementById("connection-label").textContent = online ? "Connected" : "Connection unavailable";
+            document.getElementById("connection-detail").textContent = online ? "PowerGrid reachable" : "Saved view only";
+            document.getElementById("offline-note").hidden = online;
+        }
+
+        async function updateConnection() {
+            const checkId = ++connectionCheckId;
+            if (!navigator.onLine) {
+                setConnectionStatus(false);
+                return;
+            }
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 4000);
+            let reachable = false;
+            try {
+                const response = await fetch("./health", { cache: "no-store", signal: controller.signal });
+                reachable = response.ok;
+            } catch {
+                reachable = false;
+            } finally {
+                clearTimeout(timeout);
+            }
+
+            if (checkId === connectionCheckId) setConnectionStatus(reachable);
+        }
+
+        window.addEventListener("online", updateConnection);
+        window.addEventListener("offline", updateConnection);
+        window.addEventListener("focus", updateConnection);
+        window.setInterval(() => {
+            if (document.visibilityState === "visible") updateConnection();
+        }, 30000);
+        updateConnection();
+
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("./sw.js").catch((error) => {
+                console.error("Could not register the offline app shell:", error);
+                const note = document.getElementById("offline-note");
+                note.hidden = false;
+                note.textContent = "Offline caching could not be enabled. Keep a connection available while using this page.";
+            });
+        }
+
+        document.getElementById("report-form").addEventListener("submit", (event) => {
+            event.preventDefault();
+            document.getElementById("form-message").textContent =
+                "The report form is ready, but saving and syncing are not connected in this layout-only page.";
+        });
+    </script>
+</body>
+</html>
